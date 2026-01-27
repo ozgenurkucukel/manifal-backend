@@ -698,10 +698,10 @@ Kurallar:
 
     const resultText = await callGemini(prompt);
     res.json({ resultText: resultText.trim() });
-  } catch (err) {
-    console.error("❌ /api/fortune/horoscope hata:", err);
-    res.status(500).json({ error: "Burç yorumu alınamadı." });
-  }
+ } catch (err) {
+  console.error("❌ /api/fortune/horoscope hata:", err);
+  res.status(500).json({ error: "Burç yorumu alınamadı.", detail: String(err) });
+}
 });
 
 // ----------------- Ana endpoint: /api/fortune/text -----------------
