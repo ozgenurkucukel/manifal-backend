@@ -74,6 +74,24 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
   return res.json({ ok: true });
 });
 
+console.log(`📧 [SECURE NOTE] mailer=${!!mailer}`);
+
+if (mailer) {
+  try {
+    await mailer.sendMail({
+      from: process.env.SMTP_USER,
+      to: email,
+      subject: "Kilitli Not Defteri - Şifre Sıfırlama Kodu",
+      text: `Kilitli Not Defteri şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
+    });
+    console.log(`✅ [SECURE NOTE MAIL SENT] to=${maskEmail(email)}`);
+  } catch (e) {
+    console.error("❌ [SECURE NOTE MAIL FAILED]:", e);
+  }
+} else {
+  console.log("📭 [SECURE NOTE] SMTP yok (mailer=null)");
+}
+
 // ✅ Secure Note: OTP doğrula (Flutter burada OK bekliyor)
 app.post("/api/secure-note/confirm-reset", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
