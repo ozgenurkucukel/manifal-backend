@@ -2,9 +2,12 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
 import multer from "multer";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
+
+
 
 dotenv.config();
 
@@ -31,39 +34,6 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function genOtp() {
-  // 6 haneli numeric
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
-function createMailer() {
-  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
-  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) return null;
-
-  return nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: Number(SMTP_PORT),
-    secure: false, // Gmail 587 STARTTLS
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-}
-
-// Mailer’ı bir kez oluştur
-const mailer = createMailer();
-
-// Sunucu açılırken mailer bağlantısını test et (log için)
-(async () => {
-  if (!mailer) {
-    console.log("📭 SMTP ayarlı değil. Mail gönderimi kapalı (mailer=null).");
-    return;
-  }
-  try {
-    await mailer.verify();
-    console.log("✅ SMTP bağlantısı OK");
-  } catch (e) {
-    console.error("❌ SMTP verify hata:", e);
-  }
-})();
 
 // ================== SECURE NOTE RESET (OTP) ==================
 // auth resetTokens ile karışmasın diye ayrı store:
@@ -84,8 +54,6 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
     `✅ [SECURE NOTE OTP SET] email=${maskEmail(email)} code=${code} exp=${new Date(expiresAt).toISOString()}`
   );
 
-  console.log(`📧 [SECURE NOTE] mailer=${!!mailer}`);
-
   if (mailer) {
     try {
       await mailer.sendMail({
@@ -97,7 +65,7 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
       console.log(`✅ [SECURE NOTE MAIL SENT] to=${maskEmail(email)}`);
     } catch (e) {
       console.error("❌ [SECURE NOTE MAIL FAILED]:", e);
-      // mail patlasa bile ok dönelim (Flutter akışı kırılmasın)
+      return res.status(500).json({ error: "Mail gönderilemedi" });
     }
   } else {
     console.log("📭 SMTP yok. Secure Note OTP (debug):", code);
@@ -105,6 +73,7 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
 
   return res.json({ ok: true });
 });
+    
 
 // ✅ Secure Note: OTP doğrula (Flutter burada OK bekliyor)
 app.post("/api/secure-note/confirm-reset", async (req, res) => {
@@ -139,6 +108,7 @@ app.post("/api/secure-note/confirm-reset", async (req, res) => {
   }
 
   // ✅ Kod doğru → backend sadece onay verir.
+  // PIN zaten cihazda secure storage + hash olarak tutuluyor.
   secureNoteResetTokens.delete(email);
 
   return res.json({ ok: true });
@@ -152,6 +122,42 @@ const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 function hashPassword(pw) {
   return crypto.createHash("sha256").update(String(pw)).digest("hex");
 }
+
+function genOtp() {
+  // 6 haneli numeric
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function createMailer() {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) return null;
+
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT),
+    secure: false, // Gmail 587 STARTTLS
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+// Mailer’ı bir kez oluştur
+const mailer = createMailer();
+
+// Sunucu açılırken mailer bağlantısını test et (log için)
+(async () => {
+  if (!mailer) {
+    console.log("📭 SMTP ayarlı değil. OTP maile gitmez, konsola basılır.");
+    return;
+  }
+  try {
+    await mailer.verify();
+    console.log("✅ SMTP bağlantısı OK");
+  } catch (e) {
+    console.error("❌ SMTP verify hata:", e);
+  }
+})();
+
+// ----------------- AUTH ENDPOINTS -----------------
 
 // ✅ Register
 app.post("/api/auth/register", async (req, res) => {
@@ -169,13 +175,13 @@ app.post("/api/auth/register", async (req, res) => {
 
   users.set(email, { email, passwordHash: hashPassword(password) });
 
-  if (mailer) {
-    try {
-      await mailer.sendMail({
-        from: process.env.SMTP_USER,
-        to: email,
-        subject: "Mani Fal’a Hoş Geldin ✨",
-        text: `Merhaba,
+ if (mailer) {
+  try {
+    await mailer.sendMail({
+      from: process.env.SMTP_USER,
+      to: email,
+      subject: "Mani Fal’a Hoş Geldin ✨",
+      text: `Merhaba,
 
 Mani Fal’a hoş geldin.
 
@@ -194,20 +200,22 @@ sana sadece durup hissetmen için bir alan açar.
 Keyifli keşifler dileriz.
 
 Sevgiyle,
-Mani Fal ✨`,
-      });
+Mani Fal ✨`
+    });
 
-      console.log(`✅ [WELCOME MAIL SENT] to=${maskEmail(email)}`);
-    } catch (e) {
-      console.error("❌ [WELCOME MAIL FAILED]:", e);
-    }
-  } else {
-    console.log("📭 SMTP yok. Hoş geldin maili gönderilemedi (mailer=null).");
+    console.log(`✅ [WELCOME MAIL SENT] to=${maskEmail(email)}`);
+  } catch (e) {
+    console.error("❌ [WELCOME MAIL FAILED]:", e);
+  }
+}
+ else {
+    console.log("📭 SMTP yok. Hoş geldin maili gönderilemedi (SMTP ayarlı değil).");
   }
 
   console.log(`✅ [REGISTER OK] users.size=${users.size}`);
   return res.status(201).json({ ok: true });
 });
+
 
 // ✅ Login
 app.post("/api/auth/login", async (req, res) => {
@@ -229,7 +237,7 @@ app.post("/api/auth/login", async (req, res) => {
   return res.json({ ok: true });
 });
 
-// ✅ Forgot Password: OTP üret + mail gönder
+// ✅ Forgot Password: OTP üret + mail gönder  (TEK KERE VAR)
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   console.log(`🟨 [FORGOT] ${nowIso()} email=${maskEmail(email)}`);
@@ -311,7 +319,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
   const entry = resetTokens.get(email);
   if (!entry) {
-    console.log("❌ [RESET] entry yok (muhtemelen server restart)");
+    console.log("❌ [RESET] entry yok (muhtemelen farklı server/IP veya restart)");
     return res.status(400).json({ error: "Kod bulunamadı" });
   }
 
@@ -366,9 +374,7 @@ async function callGemini(prompt, { retries = 5 } = {}) {
 
     if (code === 503 || code === 429) {
       const waitMs = Math.min(20000, 1500 * Math.pow(2, attempt - 1));
-      console.error(
-        `⏳ Gemini geçici hata ${code}: ${msg} | deneme ${attempt}/${retries} | ${waitMs}ms bekle`
-      );
+      console.error(`⏳ Gemini geçici hata ${code}: ${msg} | deneme ${attempt}/${retries} | ${waitMs}ms bekle`);
       await sleep(waitMs);
       lastErr = { code, msg };
       continue;
@@ -409,9 +415,7 @@ async function callGeminiVision(parts, { retries = 5 } = {}) {
 
     if (code === 503 || code === 429) {
       const waitMs = Math.min(20000, 1500 * Math.pow(2, attempt - 1));
-      console.error(
-        `⏳ Gemini Vision geçici hata ${code}: ${msg} | deneme ${attempt}/${retries} | ${waitMs}ms bekle`
-      );
+      console.error(`⏳ Gemini Vision geçici hata ${code}: ${msg} | deneme ${attempt}/${retries} | ${waitMs}ms bekle`);
       await sleep(waitMs);
       lastErr = { code, msg };
       continue;
@@ -473,9 +477,12 @@ Doğum bilgileri:
   let resultText;
 
   try {
+    // 🔮 Gemini dene
     resultText = await callGemini(prompt);
   } catch (e) {
     console.error("⚠️ Gemini unavailable, fallback kullanılıyor");
+
+    // 🛟 FALLBACK (deterministic, her zaman çalışır)
     const hour = parseInt(String(birthTime).split(":")[0], 10);
     const idx = isNaN(hour) ? 0 : hour % 12;
 
@@ -485,6 +492,7 @@ Doğum bilgileri:
     });
   }
 
+  // ✅ Gemini sonucu parse et
   let risingSignId = null;
 
   try {
@@ -498,6 +506,7 @@ Doğum bilgileri:
   risingSignId = String(risingSignId || "").toLowerCase().trim();
 
   if (!allowed.includes(risingSignId)) {
+    // Gemini saçmalarsa bile fallback
     const hour = parseInt(String(birthTime).split(":")[0], 10);
     const idx = isNaN(hour) ? 0 : hour % 12;
 
@@ -512,6 +521,8 @@ Doğum bilgileri:
     source: "gemini",
   });
 });
+
+
 
 // ----------------- Kahve falı endpoints -----------------
 app.post(
@@ -767,16 +778,17 @@ Kurallar:
 
     const resultText = await callGemini(prompt);
     res.json({ resultText: resultText.trim() });
-  } catch (err) {
-    console.error("❌ /api/fortune/horoscope hata:", err);
-    res.status(500).json({ error: "Burç yorumu alınamadı.", detail: String(err) });
-  }
+ } catch (err) {
+  console.error("❌ /api/fortune/horoscope hata:", err);
+  res.status(500).json({ error: "Burç yorumu alınamadı.", detail: String(err) });
+}
 });
 
 // ----------------- Ana endpoint: /api/fortune/text -----------------
 app.post("/api/fortune/text", async (req, res) => {
   const { type, userProfile } = req.body || {};
 
+  // 🐰 Tavşan falı – tek cümlelik motivasyon
   if (type === "rabbit_fortune_short") {
     const name = userProfile?.name || "kullanıcı";
 
@@ -796,10 +808,13 @@ Kurallar:
       return res.json({ resultText: result.trim() });
     } catch (err) {
       console.error("🐰 Tavşan falı hata:", err);
-      return res.json({ resultText: "Bugün kalbin sana doğru yolu fısıldıyor ✨" });
+      return res.json({
+        resultText: "Bugün kalbin sana doğru yolu fısıldıyor ✨",
+      });
     }
   }
 
+  // 🔚 Diğer her şey için genel fallback
   try {
     const prompt = buildPrompt(req.body);
     const resultText = await callGemini(prompt);
