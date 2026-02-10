@@ -34,6 +34,85 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+
+// ================== SECURE NOTE RESET (OTP) ==================
+// auth resetTokens ile karışmasın diye ayrı store:
+const secureNoteResetTokens = new Map(); // email -> { code, expiresAt, createdAt }
+
+// ✅ Secure Note: OTP üret + mail gönder
+app.post("/api/secure-note/request-reset", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  console.log(`🟨 [SECURE NOTE FORGOT] ${nowIso()} email=${maskEmail(email)}`);
+
+  if (!email) return res.status(400).json({ error: "email zorunlu" });
+
+  const code = genOtp();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 dk
+  secureNoteResetTokens.set(email, { code, expiresAt, createdAt: Date.now() });
+
+  console.log(
+    `✅ [SECURE NOTE OTP SET] email=${maskEmail(email)} code=${code} exp=${new Date(expiresAt).toISOString()}`
+  );
+
+  if (mailer) {
+    try {
+      await mailer.sendMail({
+        from: process.env.SMTP_USER,
+        to: email,
+        subject: "Kilitli Not Defteri - Şifre Sıfırlama Kodu",
+        text: `Kilitli Not Defteri şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
+      });
+      console.log(`✅ [SECURE NOTE MAIL SENT] to=${maskEmail(email)}`);
+    } catch (e) {
+      console.error("❌ [SECURE NOTE MAIL FAILED]:", e);
+      return res.status(500).json({ error: "Mail gönderilemedi" });
+    }
+  } else {
+    console.log("📭 SMTP yok. Secure Note OTP (debug):", code);
+  }
+
+  return res.json({ ok: true });
+});
+
+// ✅ Secure Note: OTP doğrula (Flutter burada OK bekliyor)
+app.post("/api/secure-note/confirm-reset", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const code = String(req.body?.code || "").trim();
+  const newPin = String(req.body?.newPin || "").trim(); // sadece format kontrolü
+
+  console.log(`🟧 [SECURE NOTE CONFIRM] ${nowIso()} email=${maskEmail(email)} code=${code}`);
+
+  if (!email || !code || !newPin) {
+    return res.status(400).json({ error: "email, code, newPin zorunlu" });
+  }
+
+  if (!/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: "Kod 6 haneli olmalı" });
+  }
+
+  if (!/^\d{4,6}$/.test(newPin)) {
+    return res.status(400).json({ error: "PIN 4-6 haneli olmalı" });
+  }
+
+  const entry = secureNoteResetTokens.get(email);
+  if (!entry) return res.status(400).json({ error: "Kod bulunamadı" });
+
+  if (Date.now() > entry.expiresAt) {
+    secureNoteResetTokens.delete(email);
+    return res.status(400).json({ error: "Kod süresi doldu" });
+  }
+
+  if (String(entry.code).trim() !== code) {
+    return res.status(400).json({ error: "Kod hatalı" });
+  }
+
+  // ✅ Kod doğru → backend sadece onay verir.
+  // PIN zaten cihazda secure storage + hash olarak tutuluyor.
+  secureNoteResetTokens.delete(email);
+
+  return res.json({ ok: true });
+});
+
 // ----------------- AUTH (DEMO STORE) -----------------
 // ⚠️ Demo: sunucu kapanınca silinir. Gerçekte DB bağlanmalı.
 const users = new Map(); // email -> { email, passwordHash }
