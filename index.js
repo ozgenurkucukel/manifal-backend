@@ -64,6 +64,8 @@ function ensureUploadDir() {
   }
 }
 ensureUploadDir();
+ensureShareDir();
+
 
 // ✅ ADDED (static serve uploads)
 app.use("/uploads", express.static(UPLOAD_DIR));
