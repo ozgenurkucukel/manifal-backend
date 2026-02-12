@@ -24,10 +24,8 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 // ✅ ADDED
 const ADMIN_KEY = process.env.ADMIN_KEY || "ozge123!";
 // ✅ CHANGED: Render kalıcı disk (disk mount path /data olmalı)
-const SHARE_FILE = "/data/shares.json";
-
-// ✅ ADDED: foto upload klasörü (kalıcı)
-const UPLOAD_DIR = "/data/uploads";
+const SHARE_FILE = path.join(process.cwd(), "shares.json");
+const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 
 
 // ----------------- helpers -----------------
