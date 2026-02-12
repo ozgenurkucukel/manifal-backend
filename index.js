@@ -7,7 +7,9 @@ import multer from "multer";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
 
-
+// ✅ ADDED
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
 
@@ -18,6 +20,10 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+// ✅ ADDED
+const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME";
+const SHARE_FILE = path.join(process.cwd(), "shares.json");
 
 // ----------------- helpers -----------------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -34,6 +40,41 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// ✅ ADDED (manifest share helpers)
+function readShares() {
+  try {
+    if (!fs.existsSync(SHARE_FILE)) return [];
+    const raw = fs.readFileSync(SHARE_FILE, "utf-8");
+    const data = JSON.parse(raw || "[]");
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("readShares error", e);
+    return [];
+  }
+}
+
+function writeShares(arr) {
+  try {
+    fs.writeFileSync(SHARE_FILE, JSON.stringify(arr, null, 2), "utf-8");
+  } catch (e) {
+    console.error("writeShares error", e);
+  }
+}
+
+function requireAdmin(req, res, next) {
+  const key = req.headers["x-admin-key"] || req.query.key;
+  if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
+  next();
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
 
 // ================== SECURE NOTE RESET (OTP) ==================
 // auth resetTokens ile karışmasın diye ayrı store:
@@ -73,7 +114,6 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
 
   return res.json({ ok: true });
 });
-    
 
 // ✅ Secure Note: OTP doğrula (Flutter burada OK bekliyor)
 app.post("/api/secure-note/confirm-reset", async (req, res) => {
@@ -175,13 +215,13 @@ app.post("/api/auth/register", async (req, res) => {
 
   users.set(email, { email, passwordHash: hashPassword(password) });
 
- if (mailer) {
-  try {
-    await mailer.sendMail({
-      from: process.env.SMTP_USER,
-      to: email,
-      subject: "Mani Fal’a Hoş Geldin ✨",
-      text: `Merhaba,
+  if (mailer) {
+    try {
+      await mailer.sendMail({
+        from: process.env.SMTP_USER,
+        to: email,
+        subject: "Mani Fal’a Hoş Geldin ✨",
+        text: `Merhaba,
 
 Mani Fal’a hoş geldin.
 
@@ -200,22 +240,20 @@ sana sadece durup hissetmen için bir alan açar.
 Keyifli keşifler dileriz.
 
 Sevgiyle,
-Mani Fal ✨`
-    });
+Mani Fal ✨`,
+      });
 
-    console.log(`✅ [WELCOME MAIL SENT] to=${maskEmail(email)}`);
-  } catch (e) {
-    console.error("❌ [WELCOME MAIL FAILED]:", e);
-  }
-}
- else {
+      console.log(`✅ [WELCOME MAIL SENT] to=${maskEmail(email)}`);
+    } catch (e) {
+      console.error("❌ [WELCOME MAIL FAILED]:", e);
+    }
+  } else {
     console.log("📭 SMTP yok. Hoş geldin maili gönderilemedi (SMTP ayarlı değil).");
   }
 
   console.log(`✅ [REGISTER OK] users.size=${users.size}`);
   return res.status(201).json({ ok: true });
 });
-
 
 // ✅ Login
 app.post("/api/auth/login", async (req, res) => {
@@ -439,6 +477,67 @@ function genId() {
   return Date.now().toString() + Math.random().toString(16).slice(2);
 }
 
+// ✅ ADDED (manifest share endpoints)
+app.post("/api/manifest/share", (req, res) => {
+  try {
+    const { text, user } = req.body || {};
+
+    if (!text || String(text).trim().length < 3) {
+      return res.status(400).json({ error: "text required" });
+    }
+
+    const shares = readShares();
+
+    const item = {
+      id: crypto.randomUUID?.() || String(Date.now()),
+      text: String(text).trim(),
+      user: user || null,
+      createdAt: new Date().toISOString(),
+      ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null,
+    };
+
+    shares.unshift(item);
+    writeShares(shares);
+
+    return res.json({ ok: true, id: item.id });
+  } catch (e) {
+    console.error("share save error", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+app.get("/api/admin/manifest/shares", requireAdmin, (req, res) => {
+  const shares = readShares();
+  res.json({ ok: true, count: shares.length, shares });
+});
+
+app.get("/admin/shares", requireAdmin, (req, res) => {
+  const shares = readShares();
+
+  const rows = shares
+    .map(
+      (s) => `
+      <div style="padding:12px;border:1px solid #eee;border-radius:12px;margin:10px 0;">
+        <div style="font-weight:700;">${new Date(s.createdAt).toLocaleString()}</div>
+        <div style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</div>
+        <div style="opacity:.6;margin-top:8px;font-size:12px;">id: ${s.id} | ip: ${s.ip || "-"}</div>
+      </div>
+    `
+    )
+    .join("");
+
+  res.send(`
+    <html>
+      <head><meta charset="utf-8"/><title>Manifest Paylaşımları</title></head>
+      <body style="font-family:Arial;padding:18px;max-width:900px;margin:0 auto;">
+        <h2>Manifest Paylaşımları (${shares.length})</h2>
+        <p style="opacity:.7">Bu sayfayı açmak için key gerekli.</p>
+        ${rows || "<p>Henüz paylaşım yok.</p>"}
+      </body>
+    </html>
+  `);
+});
+
 // ----------------- Yükselen burç (Gemini + fallback) -----------------
 app.post("/api/astrology/rising", async (req, res) => {
   const { birthDate, birthTime, birthPlace } = req.body || {};
@@ -521,8 +620,6 @@ Doğum bilgileri:
     source: "gemini",
   });
 });
-
-
 
 // ----------------- Kahve falı endpoints -----------------
 app.post(
@@ -778,10 +875,10 @@ Kurallar:
 
     const resultText = await callGemini(prompt);
     res.json({ resultText: resultText.trim() });
- } catch (err) {
-  console.error("❌ /api/fortune/horoscope hata:", err);
-  res.status(500).json({ error: "Burç yorumu alınamadı.", detail: String(err) });
-}
+  } catch (err) {
+    console.error("❌ /api/fortune/horoscope hata:", err);
+    res.status(500).json({ error: "Burç yorumu alınamadı.", detail: String(err) });
+  }
 });
 
 // ----------------- Ana endpoint: /api/fortune/text -----------------
