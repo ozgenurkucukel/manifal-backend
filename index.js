@@ -23,7 +23,11 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 // ✅ ADDED
 const ADMIN_KEY = process.env.ADMIN_KEY || "ozge123!";
-const SHARE_FILE = path.join(process.cwd(), "shares.json");
+// ✅ CHANGED: Render kalıcı disk (disk mount path /data olmalı)
+const SHARE_FILE = "/data/shares.json";
+
+// ✅ ADDED: foto upload klasörü (kalıcı)
+const UPLOAD_DIR = "/data/uploads";
 
 
 // ----------------- helpers -----------------
@@ -50,6 +54,19 @@ function ensureShareDir() {
     console.error("ensureShareDir error", e);
   }
 }
+
+// ✅ ADDED (upload dir)
+function ensureUploadDir() {
+  try {
+    if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  } catch (e) {
+    console.error("ensureUploadDir error", e);
+  }
+}
+ensureUploadDir();
+
+// ✅ ADDED (static serve uploads)
+app.use("/uploads", express.static(UPLOAD_DIR));
 
 function readShares() {
   try {
@@ -478,7 +495,22 @@ async function callGeminiVision(parts, { retries = 5 } = {}) {
 }
 
 // ----------------- Upload (multer) -----------------
+// ✅ AYNEN KALDI: kahve falı için memoryStorage
 const upload = multer({ storage: multer.memoryStorage() });
+
+// ✅ ADDED: manifest için disk storage (foto kaydı)
+const manifestUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      const ext = (file.originalname.split(".").pop() || "jpg")
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+      cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}.${ext || "jpg"}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
 
 // ----------------- 5dk Job Store -----------------
 const fortuneJobs = new Map();
@@ -488,10 +520,17 @@ function genId() {
   return Date.now().toString() + Math.random().toString(16).slice(2);
 }
 
-// ✅ ADDED (manifest share endpoints)
-app.post("/api/manifest/share", (req, res) => {
+// ✅ ADDED (manifest share endpoints)  ✅ UPDATED: photo optional
+app.post("/api/manifest/share", manifestUpload.single("image"), (req, res) => {
   try {
-    const { text, user } = req.body || {};
+    // JSON veya multipart ikisi de gelsin:
+    const text = String(req.body?.text || req.body?.text === "" ? req.body.text : "").trim();
+    let user = req.body?.user ?? null;
+
+    // multipart'ta user JSON string gelebilir
+    if (typeof user === "string") {
+      try { user = JSON.parse(user); } catch (_) {}
+    }
 
     if (!text || String(text).trim().length < 3) {
       return res.status(400).json({ error: "text required" });
@@ -499,10 +538,13 @@ app.post("/api/manifest/share", (req, res) => {
 
     const shares = readShares();
 
+    const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+
     const item = {
       id: crypto.randomUUID?.() || String(Date.now()),
       text: String(text).trim(),
       user: user || null,
+      imageUrl, // ✅ ADDED
       createdAt: new Date().toISOString(),
       ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null,
     };
@@ -510,7 +552,7 @@ app.post("/api/manifest/share", (req, res) => {
     shares.unshift(item);
     writeShares(shares);
 
-    return res.json({ ok: true, id: item.id });
+    return res.json({ ok: true, id: item.id, imageUrl });
   } catch (e) {
     console.error("share save error", e);
     return res.status(500).json({ error: "server error" });
@@ -532,6 +574,13 @@ app.get("/admin/shares", requireAdmin, (req, res) => {
       <div style="padding:12px;border:1px solid #eee;border-radius:12px;margin:10px 0;">
         <div style="font-weight:700;">${new Date(s.createdAt).toLocaleString()}</div>
         <div style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</div>
+
+        ${
+          s.imageUrl
+            ? `<img src="${escapeHtml(s.imageUrl)}" style="max-width:100%;border-radius:12px;margin-top:10px;" />`
+            : ""
+        }
+
         <div style="opacity:.6;margin-top:8px;font-size:12px;">id: ${s.id} | ip: ${s.ip || "-"}</div>
 
         <a href="/admin/shares/${encodeURIComponent(s.id)}?key=${encodeURIComponent(key)}"
@@ -555,7 +604,7 @@ app.get("/admin/shares", requireAdmin, (req, res) => {
   `);
 });
 
-// ✅ ADDED: detail page
+// ✅ ADDED: detail page (✅ UPDATED: photo show)
 app.get("/admin/shares/:id", requireAdmin, (req, res) => {
   const shares = readShares();
   const item = shares.find((x) => String(x.id) === String(req.params.id));
@@ -592,6 +641,14 @@ app.get("/admin/shares/:id", requireAdmin, (req, res) => {
           style="white-space:pre-wrap;margin-top:12px;padding:12px;border:1px solid #eee;border-radius:12px;background:#fafafa;">
 ${escapeHtml(item.text)}
         </pre>
+
+        ${
+          item.imageUrl
+            ? `<div style="margin-top:12px;">
+                 <img src="${escapeHtml(item.imageUrl)}" style="max-width:100%;border-radius:12px;" />
+               </div>`
+            : ""
+        }
 
         <div style="opacity:.6;margin-top:10px;font-size:12px;">
           ip: ${escapeHtml(item.ip || "-")}
