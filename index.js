@@ -22,8 +22,9 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 // ✅ ADDED
-const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME";
-const SHARE_FILE = "/data/shares.json";
+const ADMIN_KEY = process.env.ADMIN_KEY || "ozge123!";
+const SHARE_FILE = path.join(process.cwd(), "shares.json");
+
 
 // ----------------- helpers -----------------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
