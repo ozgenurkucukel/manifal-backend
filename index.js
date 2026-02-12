@@ -187,6 +187,42 @@ app.post("/api/secure-note/confirm-reset", async (req, res) => {
 const users = new Map(); // email -> { email, passwordHash }
 const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 
+// ✅ FIX (FREE): users'ı dosyaya yaz/oku (Render free'de RAM uçtuğu için login hatası buradan geliyor)
+const USERS_FILE = path.join(process.cwd(), "users.json");
+
+function loadUsersFromFile() {
+  try {
+    if (!fs.existsSync(USERS_FILE)) return;
+    const raw = fs.readFileSync(USERS_FILE, "utf-8");
+    const arr = JSON.parse(raw || "[]");
+    if (!Array.isArray(arr)) return;
+
+    for (const u of arr) {
+      if (u?.email && u?.passwordHash) {
+        users.set(String(u.email).toLowerCase().trim(), {
+          email: String(u.email).toLowerCase().trim(),
+          passwordHash: String(u.passwordHash),
+        });
+      }
+    }
+    console.log(`🧩 [AUTH BOOT] users loaded = ${users.size}`);
+  } catch (e) {
+    console.error("read users.json error:", e);
+  }
+}
+
+function saveUsersToFile() {
+  try {
+    const arr = Array.from(users.values());
+    fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
+  } catch (e) {
+    console.error("write users.json error:", e);
+  }
+}
+
+// ✅ Server açılınca bir kere yükle
+loadUsersFromFile();
+
 function hashPassword(pw) {
   return crypto.createHash("sha256").update(String(pw)).digest("hex");
 }
@@ -242,6 +278,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   users.set(email, { email, passwordHash: hashPassword(password) });
+  saveUsersToFile(); // ✅ FIX
 
   if (mailer) {
     try {
@@ -405,6 +442,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
   }
 
   users.set(email, { email, passwordHash: hashPassword(newPassword) });
+  saveUsersToFile(); // ✅ FIX
   resetTokens.delete(email);
 
   console.log(`✅ [RESET OK] ${maskEmail(email)}`);
