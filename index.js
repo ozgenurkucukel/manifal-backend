@@ -25,7 +25,6 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const ADMIN_KEY = process.env.ADMIN_KEY || "CHANGE_ME";
 const SHARE_FILE = "/data/shares.json";
 
-
 // ----------------- helpers -----------------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const whereNotNull = (arr) => arr.filter((x) => x != null);
@@ -42,6 +41,15 @@ function nowIso() {
 }
 
 // ✅ ADDED (manifest share helpers)
+function ensureShareDir() {
+  try {
+    const dir = path.dirname(SHARE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    console.error("ensureShareDir error", e);
+  }
+}
+
 function readShares() {
   try {
     if (!fs.existsSync(SHARE_FILE)) return [];
@@ -56,6 +64,7 @@ function readShares() {
 
 function writeShares(arr) {
   try {
+    ensureShareDir(); // ✅ ADDED
     fs.writeFileSync(SHARE_FILE, JSON.stringify(arr, null, 2), "utf-8");
   } catch (e) {
     console.error("writeShares error", e);
@@ -276,7 +285,7 @@ app.post("/api/auth/login", async (req, res) => {
   return res.json({ ok: true });
 });
 
-// ✅ Forgot Password: OTP üret + mail gönder  (TEK KERE VAR)
+// ✅ Forgot Password: OTP üret + mail gönder
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   console.log(`🟨 [FORGOT] ${nowIso()} email=${maskEmail(email)}`);
@@ -514,6 +523,7 @@ app.get("/api/admin/manifest/shares", requireAdmin, (req, res) => {
 
 app.get("/admin/shares", requireAdmin, (req, res) => {
   const shares = readShares();
+  const key = req.query.key ? String(req.query.key) : "";
 
   const rows = shares
     .map(
@@ -522,6 +532,11 @@ app.get("/admin/shares", requireAdmin, (req, res) => {
         <div style="font-weight:700;">${new Date(s.createdAt).toLocaleString()}</div>
         <div style="white-space:pre-wrap;margin-top:6px;">${escapeHtml(s.text)}</div>
         <div style="opacity:.6;margin-top:8px;font-size:12px;">id: ${s.id} | ip: ${s.ip || "-"}</div>
+
+        <a href="/admin/shares/${encodeURIComponent(s.id)}?key=${encodeURIComponent(key)}"
+           style="display:inline-block;margin-top:8px;text-decoration:none;color:#E75480;font-weight:700;">
+          Aç →
+        </a>
       </div>
     `
     )
@@ -534,6 +549,60 @@ app.get("/admin/shares", requireAdmin, (req, res) => {
         <h2>Manifest Paylaşımları (${shares.length})</h2>
         <p style="opacity:.7">Bu sayfayı açmak için key gerekli.</p>
         ${rows || "<p>Henüz paylaşım yok.</p>"}
+      </body>
+    </html>
+  `);
+});
+
+// ✅ ADDED: detail page
+app.get("/admin/shares/:id", requireAdmin, (req, res) => {
+  const shares = readShares();
+  const item = shares.find((x) => String(x.id) === String(req.params.id));
+
+  if (!item) return res.status(404).send("Not found");
+
+  const key = req.query.key ? String(req.query.key) : "";
+
+  res.send(`
+    <html>
+      <head>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1"/>
+        <title>Paylaşım Detayı</title>
+      </head>
+      <body style="font-family:Arial;padding:18px;max-width:900px;margin:0 auto;">
+        <a href="/admin/shares?key=${encodeURIComponent(key)}"
+           style="display:inline-block;margin-bottom:12px;text-decoration:none;">
+          ← Geri
+        </a>
+
+        <h2>Paylaşım Detayı</h2>
+
+        <div style="opacity:.7;margin:8px 0 12px 0;">
+          ${new Date(item.createdAt).toLocaleString()} • id: ${escapeHtml(item.id)}
+        </div>
+
+        <button onclick="copyText()"
+          style="padding:10px 12px;border:1px solid #ddd;border-radius:10px;cursor:pointer;background:#fff;">
+          Kopyala
+        </button>
+
+        <pre id="txt"
+          style="white-space:pre-wrap;margin-top:12px;padding:12px;border:1px solid #eee;border-radius:12px;background:#fafafa;">
+${escapeHtml(item.text)}
+        </pre>
+
+        <div style="opacity:.6;margin-top:10px;font-size:12px;">
+          ip: ${escapeHtml(item.ip || "-")}
+        </div>
+
+        <script>
+          function copyText() {
+            const t = document.getElementById("txt").innerText;
+            navigator.clipboard.writeText(t);
+            alert("Kopyalandı ✅");
+          }
+        </script>
       </body>
     </html>
   `);
@@ -577,12 +646,9 @@ Doğum bilgileri:
   let resultText;
 
   try {
-    // 🔮 Gemini dene
     resultText = await callGemini(prompt);
   } catch (e) {
     console.error("⚠️ Gemini unavailable, fallback kullanılıyor");
-
-    // 🛟 FALLBACK (deterministic, her zaman çalışır)
     const hour = parseInt(String(birthTime).split(":")[0], 10);
     const idx = isNaN(hour) ? 0 : hour % 12;
 
@@ -592,7 +658,6 @@ Doğum bilgileri:
     });
   }
 
-  // ✅ Gemini sonucu parse et
   let risingSignId = null;
 
   try {
@@ -606,7 +671,6 @@ Doğum bilgileri:
   risingSignId = String(risingSignId || "").toLowerCase().trim();
 
   if (!allowed.includes(risingSignId)) {
-    // Gemini saçmalarsa bile fallback
     const hour = parseInt(String(birthTime).split(":")[0], 10);
     const idx = isNaN(hour) ? 0 : hour % 12;
 
@@ -886,7 +950,6 @@ Kurallar:
 app.post("/api/fortune/text", async (req, res) => {
   const { type, userProfile } = req.body || {};
 
-  // 🐰 Tavşan falı – tek cümlelik motivasyon
   if (type === "rabbit_fortune_short") {
     const name = userProfile?.name || "kullanıcı";
 
@@ -912,7 +975,6 @@ Kurallar:
     }
   }
 
-  // 🔚 Diğer her şey için genel fallback
   try {
     const prompt = buildPrompt(req.body);
     const resultText = await callGemini(prompt);
