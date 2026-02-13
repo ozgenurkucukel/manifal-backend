@@ -11,6 +11,12 @@ import nodemailer from "nodemailer";
 import fs from "fs";
 import path from "path";
 
+// ✅ ADDED
+import jwt from "jsonwebtoken";
+
+// ✅ ADDED
+import { Resend } from "resend";
+
 dotenv.config();
 
 const app = express();
@@ -27,6 +33,8 @@ const ADMIN_KEY = process.env.ADMIN_KEY || "ozge123!";
 const SHARE_FILE = path.join(process.cwd(), "shares.json");
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 
+// ✅ ADDED (JWT)
+const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 
 // ----------------- helpers -----------------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -41,6 +49,24 @@ function maskEmail(email) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+// ✅ ADDED (JWT helpers)
+function signToken(email) {
+  return jwt.sign({ email: String(email).toLowerCase().trim() }, JWT_SECRET, { expiresIn: "30d" });
+}
+
+function requireAuth(req, res, next) {
+  const h = req.headers.authorization || "";
+  const token = h.startsWith("Bearer ") ? h.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    req.user = jwt.verify(token, JWT_SECRET); // {email, iat, exp}
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: "Invalid token" });
+  }
 }
 
 // ✅ ADDED (manifest share helpers)
@@ -63,7 +89,6 @@ function ensureUploadDir() {
 }
 ensureUploadDir();
 ensureShareDir();
-
 
 // ✅ ADDED (static serve uploads)
 app.use("/uploads", express.static(UPLOAD_DIR));
@@ -108,6 +133,154 @@ function escapeHtml(str) {
 // auth resetTokens ile karışmasın diye ayrı store:
 const secureNoteResetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 
+// ----------------- AUTH (DEMO STORE) -----------------
+// ⚠️ Demo: sunucu kapanınca silinir. Gerçekte DB bağlanmalı.
+const users = new Map(); // email -> { email, passwordHash }
+const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
+
+// ✅ FIX (FREE): users'ı dosyaya yaz/oku (Render free'de RAM uçtuğu için login hatası buradan geliyor)
+const USERS_FILE = path.join(process.cwd(), "users.json");
+
+// ✅ ADDED: fortunes store (user'a göre history)
+const FORTUNES_FILE = path.join(process.cwd(), "fortunes.json");
+
+function loadUsersFromFile() {
+  try {
+    if (!fs.existsSync(USERS_FILE)) return;
+    const raw = fs.readFileSync(USERS_FILE, "utf-8");
+    const arr = JSON.parse(raw || "[]");
+    if (!Array.isArray(arr)) return;
+
+    for (const u of arr) {
+      if (u?.email && u?.passwordHash) {
+        users.set(String(u.email).toLowerCase().trim(), {
+          email: String(u.email).toLowerCase().trim(),
+          passwordHash: String(u.passwordHash),
+        });
+      }
+    }
+    console.log(`🧩 [AUTH BOOT] users loaded = ${users.size}`);
+  } catch (e) {
+    console.error("read users.json error:", e);
+  }
+}
+
+function saveUsersToFile() {
+  try {
+    const arr = Array.from(users.values());
+    fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
+  } catch (e) {
+    console.error("write users.json error:", e);
+  }
+}
+
+// ✅ ADDED: fortunes io
+function readFortunes() {
+  try {
+    if (!fs.existsSync(FORTUNES_FILE)) return [];
+    const raw = fs.readFileSync(FORTUNES_FILE, "utf-8");
+    const data = JSON.parse(raw || "[]");
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("readFortunes error:", e);
+    return [];
+  }
+}
+
+function writeFortunes(arr) {
+  try {
+    fs.writeFileSync(FORTUNES_FILE, JSON.stringify(arr, null, 2), "utf-8");
+  } catch (e) {
+    console.error("writeFortunes error:", e);
+  }
+}
+
+function addFortune({ email, type, resultText, meta }) {
+  const all = readFortunes();
+  all.unshift({
+    id: crypto.randomUUID?.() || String(Date.now()),
+    email: String(email).toLowerCase().trim(),
+    type: type || "unknown",
+    resultText: String(resultText || "").trim(),
+    meta: meta || null,
+    createdAt: new Date().toISOString(),
+  });
+  writeFortunes(all);
+}
+
+function listFortunesByEmail(email) {
+  const e = String(email).toLowerCase().trim();
+  return readFortunes().filter((x) => x?.email === e);
+}
+
+// ✅ Server açılınca bir kere yükle
+loadUsersFromFile();
+
+function hashPassword(pw) {
+  return crypto.createHash("sha256").update(String(pw)).digest("hex");
+}
+
+function genOtp() {
+  // 6 haneli numeric
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function createMailer() {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) return null;
+
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT),
+    secure: false, // Gmail 587 STARTTLS
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+// Mailer’ı bir kez oluştur
+const mailer = createMailer();
+
+// ✅ ADDED: Resend fallback (Render SMTP timeout için)
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+const MAIL_FROM = process.env.MAIL_FROM || "ManiFal <onboarding@resend.dev>";
+
+async function sendMailSafe({ to, subject, text, html }) {
+  if (mailer) {
+    try {
+      await mailer.sendMail({ from: process.env.SMTP_USER, to, subject, text, html });
+      return { ok: true, via: "smtp" };
+    } catch (e) {
+      console.error("❌ [SMTP MAIL FAILED]:", e);
+    }
+  }
+
+  if (resend) {
+    try {
+      await resend.emails.send({ from: MAIL_FROM, to, subject, text, html });
+      return { ok: true, via: "resend" };
+    } catch (e) {
+      console.error("❌ [RESEND MAIL FAILED]:", e);
+    }
+  }
+
+  return { ok: false, via: "none" };
+}
+
+// Sunucu açılırken mailer bağlantısını test et (log için)
+(async () => {
+  if (!mailer) {
+    console.log("📭 SMTP ayarlı değil. OTP maile gitmez, konsola basılır.");
+    return;
+  }
+  try {
+    await mailer.verify();
+    console.log("✅ SMTP bağlantısı OK");
+  } catch (e) {
+    console.error("❌ SMTP verify hata:", e);
+  }
+})();
+
+// ================== SECURE NOTE RESET (OTP) ==================
 // ✅ Secure Note: OTP üret + mail gönder
 app.post("/api/secure-note/request-reset", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
@@ -123,21 +296,17 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
     `✅ [SECURE NOTE OTP SET] email=${maskEmail(email)} code=${code} exp=${new Date(expiresAt).toISOString()}`
   );
 
-  if (mailer) {
-    try {
-      await mailer.sendMail({
-        from: process.env.SMTP_USER,
-        to: email,
-        subject: "Kilitli Not Defteri - Şifre Sıfırlama Kodu",
-        text: `Kilitli Not Defteri şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
-      });
-      console.log(`✅ [SECURE NOTE MAIL SENT] to=${maskEmail(email)}`);
-    } catch (e) {
-      console.error("❌ [SECURE NOTE MAIL FAILED]:", e);
-      return res.status(500).json({ error: "Mail gönderilemedi" });
-    }
+  const mailResult = await sendMailSafe({
+    to: email,
+    subject: "Kilitli Not Defteri - Şifre Sıfırlama Kodu",
+    text: `Kilitli Not Defteri şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
+  });
+
+  if (mailResult.ok) {
+    console.log(`✅ [SECURE NOTE MAIL SENT] via=${mailResult.via} to=${maskEmail(email)}`);
   } else {
-    console.log("📭 SMTP yok. Secure Note OTP (debug):", code);
+    console.log("📭 [SECURE NOTE MAIL NOT SENT]");
+    return res.status(500).json({ error: "Mail gönderilemedi" });
   }
 
   return res.json({ ok: true });
@@ -175,91 +344,9 @@ app.post("/api/secure-note/confirm-reset", async (req, res) => {
     return res.status(400).json({ error: "Kod hatalı" });
   }
 
-  // ✅ Kod doğru → backend sadece onay verir.
-  // PIN zaten cihazda secure storage + hash olarak tutuluyor.
   secureNoteResetTokens.delete(email);
-
   return res.json({ ok: true });
 });
-
-// ----------------- AUTH (DEMO STORE) -----------------
-// ⚠️ Demo: sunucu kapanınca silinir. Gerçekte DB bağlanmalı.
-const users = new Map(); // email -> { email, passwordHash }
-const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
-
-// ✅ FIX (FREE): users'ı dosyaya yaz/oku (Render free'de RAM uçtuğu için login hatası buradan geliyor)
-const USERS_FILE = path.join(process.cwd(), "users.json");
-
-function loadUsersFromFile() {
-  try {
-    if (!fs.existsSync(USERS_FILE)) return;
-    const raw = fs.readFileSync(USERS_FILE, "utf-8");
-    const arr = JSON.parse(raw || "[]");
-    if (!Array.isArray(arr)) return;
-
-    for (const u of arr) {
-      if (u?.email && u?.passwordHash) {
-        users.set(String(u.email).toLowerCase().trim(), {
-          email: String(u.email).toLowerCase().trim(),
-          passwordHash: String(u.passwordHash),
-        });
-      }
-    }
-    console.log(`🧩 [AUTH BOOT] users loaded = ${users.size}`);
-  } catch (e) {
-    console.error("read users.json error:", e);
-  }
-}
-
-function saveUsersToFile() {
-  try {
-    const arr = Array.from(users.values());
-    fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
-  } catch (e) {
-    console.error("write users.json error:", e);
-  }
-}
-
-// ✅ Server açılınca bir kere yükle
-loadUsersFromFile();
-
-function hashPassword(pw) {
-  return crypto.createHash("sha256").update(String(pw)).digest("hex");
-}
-
-function genOtp() {
-  // 6 haneli numeric
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
-function createMailer() {
-  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
-  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) return null;
-
-  return nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: Number(SMTP_PORT),
-    secure: false, // Gmail 587 STARTTLS
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-}
-
-// Mailer’ı bir kez oluştur
-const mailer = createMailer();
-
-// Sunucu açılırken mailer bağlantısını test et (log için)
-(async () => {
-  if (!mailer) {
-    console.log("📭 SMTP ayarlı değil. OTP maile gitmez, konsola basılır.");
-    return;
-  }
-  try {
-    await mailer.verify();
-    console.log("✅ SMTP bağlantısı OK");
-  } catch (e) {
-    console.error("❌ SMTP verify hata:", e);
-  }
-})();
 
 // ----------------- AUTH ENDPOINTS -----------------
 
@@ -280,13 +367,10 @@ app.post("/api/auth/register", async (req, res) => {
   users.set(email, { email, passwordHash: hashPassword(password) });
   saveUsersToFile(); // ✅ FIX
 
-  if (mailer) {
-    try {
-      await mailer.sendMail({
-        from: process.env.SMTP_USER,
-        to: email,
-        subject: "Mani Fal’a Hoş Geldin ✨",
-        text: `Merhaba,
+  const mailResult = await sendMailSafe({
+    to: email,
+    subject: "Mani Fal’a Hoş Geldin ✨",
+    text: `Merhaba,
 
 Mani Fal’a hoş geldin.
 
@@ -306,18 +390,18 @@ Keyifli keşifler dileriz.
 
 Sevgiyle,
 Mani Fal ✨`,
-      });
+  });
 
-      console.log(`✅ [WELCOME MAIL SENT] to=${maskEmail(email)}`);
-    } catch (e) {
-      console.error("❌ [WELCOME MAIL FAILED]:", e);
-    }
+  if (mailResult.ok) {
+    console.log(`✅ [WELCOME MAIL SENT] via=${mailResult.via} to=${maskEmail(email)}`);
   } else {
-    console.log("📭 SMTP yok. Hoş geldin maili gönderilemedi (SMTP ayarlı değil).");
+    console.log("📭 [WELCOME MAIL NOT SENT]");
   }
 
+  const token = signToken(email);
+
   console.log(`✅ [REGISTER OK] users.size=${users.size}`);
-  return res.status(201).json({ ok: true });
+  return res.status(201).json({ ok: true, token, email });
 });
 
 // ✅ Login
@@ -337,7 +421,8 @@ app.post("/api/auth/login", async (req, res) => {
   const ok = u.passwordHash === hashPassword(password);
   if (!ok) return res.status(401).json({ error: "E-posta veya şifre hatalı" });
 
-  return res.json({ ok: true });
+  const token = signToken(email);
+  return res.json({ ok: true, token, email });
 });
 
 // ✅ Forgot Password: OTP üret + mail gönder
@@ -358,21 +443,11 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     `✅ [FORGOT OTP SET] email=${maskEmail(email)} code=${code} exp=${new Date(expiresAt).toISOString()}`
   );
 
-  if (mailer) {
-    try {
-      await mailer.sendMail({
-        from: process.env.SMTP_USER,
-        to: email,
-        subject: "Şifre Sıfırlama Kodu",
-        text: `Şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
-      });
-      console.log(`✅ [MAIL SENT] to=${maskEmail(email)}`);
-    } catch (e) {
-      console.error("❌ [MAIL FAILED]:", e);
-    }
-  } else {
-    console.log("📭 SMTP yok. OTP (debug):", code);
-  }
+  await sendMailSafe({
+    to: email,
+    subject: "Şifre Sıfırlama Kodu",
+    text: `Şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
+  });
 
   return res.json({
     ok: true,
@@ -436,17 +511,19 @@ app.post("/api/auth/reset-password", async (req, res) => {
     return res.status(400).json({ error: "Kod hatalı" });
   }
 
-  const existing = users.get(email);
-  if (!existing) {
-    console.log(`⚠️ [RESET] user yoktu, demo olarak oluşturuluyor: ${maskEmail(email)}`);
-  }
-
   users.set(email, { email, passwordHash: hashPassword(newPassword) });
   saveUsersToFile(); // ✅ FIX
   resetTokens.delete(email);
 
   console.log(`✅ [RESET OK] ${maskEmail(email)}`);
   return res.json({ ok: true, message: "Şifre güncellendi" });
+});
+
+// ✅ ADDED: Fortune history (user'a göre)
+app.get("/api/fortune/history", requireAuth, (req, res) => {
+  const email = req.user.email;
+  const items = listFortunesByEmail(email);
+  return res.json({ ok: true, count: items.length, items });
 });
 
 // ----------------- Gemini helpers (RETRY + BACKOFF) -----------------
@@ -785,6 +862,7 @@ Doğum bilgileri:
 // ----------------- Kahve falı endpoints -----------------
 app.post(
   "/api/fortune/coffee",
+  requireAuth,
   upload.fields([
     { name: "image_left", maxCount: 1 },
     { name: "image_center", maxCount: 1 },
@@ -807,6 +885,7 @@ app.post(
       }
 
       const name = userProfile?.name || "kullanıcı";
+      const userEmail = req.user?.email;
 
       const files = req.files || {};
       const left = files["image_left"]?.[0];
@@ -828,6 +907,7 @@ app.post(
         createdAt: new Date().toISOString(),
         resultText: null,
         error: null,
+        userEmail, // ✅ ADDED
       });
 
       setTimeout(async () => {
@@ -868,7 +948,18 @@ Görev:
 
           const resultText = await callGeminiVision(parts);
 
-          fortuneJobs.set(id, { ...current, status: "ready", resultText: (resultText || "").trim(), error: null });
+          const trimmed = (resultText || "").trim();
+          fortuneJobs.set(id, { ...current, status: "ready", resultText: trimmed, error: null });
+
+          // ✅ ADDED: history save (user'a bağlı)
+          if (current.userEmail) {
+            addFortune({
+              email: current.userEmail,
+              type: "coffee_photo",
+              resultText: trimmed,
+              meta: { note: note || null },
+            });
+          }
         } catch (e) {
           fortuneJobs.set(id, { ...current, status: "error", error: String(e) });
         }
@@ -882,10 +973,11 @@ Görev:
   }
 );
 
-app.post("/api/fortune/coffee/virtual", async (req, res) => {
+app.post("/api/fortune/coffee/virtual", requireAuth, async (req, res) => {
   try {
     const { note, userProfile } = req.body || {};
     const name = userProfile?.name || "kullanıcı";
+    const userEmail = req.user?.email;
 
     const id = genId();
     fortuneJobs.set(id, {
@@ -895,6 +987,7 @@ app.post("/api/fortune/coffee/virtual", async (req, res) => {
       createdAt: new Date().toISOString(),
       resultText: null,
       error: null,
+      userEmail, // ✅ ADDED
     });
 
     setTimeout(async () => {
@@ -917,7 +1010,19 @@ Görev:
 `.trim();
 
         const resultText = await callGemini(prompt);
-        fortuneJobs.set(id, { ...current, status: "ready", resultText: (resultText || "").trim(), error: null });
+        const trimmed = (resultText || "").trim();
+
+        fortuneJobs.set(id, { ...current, status: "ready", resultText: trimmed, error: null });
+
+        // ✅ ADDED: history save (user'a bağlı)
+        if (current.userEmail) {
+          addFortune({
+            email: current.userEmail,
+            type: "coffee_virtual",
+            resultText: trimmed,
+            meta: { note: (note || "").trim() || null },
+          });
+        }
       } catch (e) {
         fortuneJobs.set(id, { ...current, status: "error", error: String(e) });
       }
