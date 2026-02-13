@@ -144,6 +144,16 @@ const USERS_FILE = path.join(process.cwd(), "users.json");
 // ✅ ADDED: fortunes store (user'a göre history)
 const FORTUNES_FILE = path.join(process.cwd(), "fortunes.json");
 
+// ✅ ADDED: fortunes/users dosyaları için klasör garanti
+function ensureFileDir(filePath) {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    console.error("ensureFileDir error", e);
+  }
+}
+
 function loadUsersFromFile() {
   try {
     if (!fs.existsSync(USERS_FILE)) return;
@@ -167,6 +177,7 @@ function loadUsersFromFile() {
 
 function saveUsersToFile() {
   try {
+    ensureFileDir(USERS_FILE);
     const arr = Array.from(users.values());
     fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
   } catch (e) {
@@ -189,6 +200,7 @@ function readFortunes() {
 
 function writeFortunes(arr) {
   try {
+    ensureFileDir(FORTUNES_FILE);
     fs.writeFileSync(FORTUNES_FILE, JSON.stringify(arr, null, 2), "utf-8");
   } catch (e) {
     console.error("writeFortunes error:", e);
@@ -241,7 +253,6 @@ function createMailer() {
 const mailer = createMailer();
 console.log("🧪 RESEND_API_KEY set?", !!process.env.RESEND_API_KEY);
 console.log("🧪 MAIL_FROM =", process.env.MAIL_FROM);
-
 
 // ✅ ADDED: Resend fallback (Render SMTP timeout için)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -1049,15 +1060,11 @@ app.get("/api/fortune/coffee/:id", requireAuth, (req, res) => {
 
   // ✅ başka kullanıcı görmesin
   if (!owner || owner !== me) {
-    // güvenlik için 404 dönmek daha iyi (id var mı yok mu anlaşılmasın)
     return res.status(404).json({ error: "Fal bulunamadı." });
-    // istersen 403 de yapabilirsin:
-    // return res.status(403).json({ error: "Forbidden" });
   }
 
   return res.json(job);
 });
-
 
 // ----------------- Tarot yardımcıları -----------------
 const tarotCardNames = {
