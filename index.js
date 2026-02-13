@@ -239,6 +239,9 @@ function createMailer() {
 
 // Mailer’ı bir kez oluştur
 const mailer = createMailer();
+console.log("🧪 RESEND_API_KEY set?", !!process.env.RESEND_API_KEY);
+console.log("🧪 MAIL_FROM =", process.env.MAIL_FROM);
+
 
 // ✅ ADDED: Resend fallback (Render SMTP timeout için)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
