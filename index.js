@@ -69,6 +69,53 @@ function requireAuth(req, res, next) {
   }
 }
 
+/* =======================================================================
+   ✅ FIX: Flutter token göndermiyor -> auth opsiyonel + userProfile.email fallback
+   ======================================================================= */
+function tryAuthEmail(req) {
+  const h = req.headers.authorization || "";
+  const token = h.startsWith("Bearer ") ? h.slice(7) : null;
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const email = String(payload?.email || "").toLowerCase().trim();
+    return email || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function emailFromBody(req) {
+  // JSON veya multipart: userProfile bazen string gelebilir
+  let up = req.body?.userProfile ?? null;
+
+  if (typeof up === "string") {
+    try { up = JSON.parse(up); } catch (_) { up = null; }
+  }
+
+  const email =
+    up?.email ||
+    req.body?.email ||
+    req.body?.userEmail;
+
+  const e = String(email || "").toLowerCase().trim();
+  return e || null;
+}
+
+// token varsa token; yoksa body’den email al
+function resolveUserEmail(req) {
+  return tryAuthEmail(req) || emailFromBody(req);
+}
+
+// requireAuth yerine kullan: token olmasa bile email ile devam edebilir
+function requireUserEmail(req, res, next) {
+  const email = resolveUserEmail(req);
+  if (!email) return res.status(401).json({ error: "Unauthorized (email missing)" });
+  req.user = { email }; // standartlaştır
+  return next();
+}
+/* ======================================================================= */
+
 // ✅ ADDED (manifest share helpers)
 function ensureShareDir() {
   try {
@@ -130,15 +177,13 @@ function escapeHtml(str) {
 }
 
 // ================== SECURE NOTE RESET (OTP) ==================
-// auth resetTokens ile karışmasın diye ayrı store:
 const secureNoteResetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 
 // ----------------- AUTH (DEMO STORE) -----------------
-// ⚠️ Demo: sunucu kapanınca silinir. Gerçekte DB bağlanmalı.
 const users = new Map(); // email -> { email, passwordHash }
 const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 
-// ✅ FIX (FREE): users'ı dosyaya yaz/oku (Render free'de RAM uçtuğu için login hatası buradan geliyor)
+// ✅ FIX (FREE): users'ı dosyaya yaz/oku
 const USERS_FILE = path.join(process.cwd(), "users.json");
 
 // ✅ ADDED: fortunes store (user'a göre history)
@@ -233,7 +278,6 @@ function hashPassword(pw) {
 }
 
 function genOtp() {
-  // 6 haneli numeric
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
@@ -244,17 +288,15 @@ function createMailer() {
   return nodemailer.createTransport({
     host: SMTP_HOST,
     port: Number(SMTP_PORT),
-    secure: false, // Gmail 587 STARTTLS
+    secure: false,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
 }
 
-// Mailer’ı bir kez oluştur
 const mailer = createMailer();
 console.log("🧪 RESEND_API_KEY set?", !!process.env.RESEND_API_KEY);
 console.log("🧪 MAIL_FROM =", process.env.MAIL_FROM);
 
-// ✅ ADDED: Resend fallback (Render SMTP timeout için)
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const MAIL_FROM = process.env.MAIL_FROM || "ManiFal <onboarding@resend.dev>";
 
@@ -280,7 +322,6 @@ async function sendMailSafe({ to, subject, text, html }) {
   return { ok: false, via: "none" };
 }
 
-// Sunucu açılırken mailer bağlantısını test et (log için)
 (async () => {
   if (!mailer) {
     console.log("📭 SMTP ayarlı değil. OTP maile gitmez, konsola basılır.");
@@ -295,7 +336,6 @@ async function sendMailSafe({ to, subject, text, html }) {
 })();
 
 // ================== SECURE NOTE RESET (OTP) ==================
-// ✅ Secure Note: OTP üret + mail gönder
 app.post("/api/secure-note/request-reset", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   console.log(`🟨 [SECURE NOTE FORGOT] ${nowIso()} email=${maskEmail(email)}`);
@@ -303,7 +343,7 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
   if (!email) return res.status(400).json({ error: "email zorunlu" });
 
   const code = genOtp();
-  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 dk
+  const expiresAt = Date.now() + 10 * 60 * 1000;
   secureNoteResetTokens.set(email, { code, expiresAt, createdAt: Date.now() });
 
   console.log(
@@ -316,35 +356,20 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
     text: `Kilitli Not Defteri şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
   });
 
-  if (mailResult.ok) {
-    console.log(`✅ [SECURE NOTE MAIL SENT] via=${mailResult.via} to=${maskEmail(email)}`);
-  } else {
-    console.log("📭 [SECURE NOTE MAIL NOT SENT]");
-    return res.status(500).json({ error: "Mail gönderilemedi" });
-  }
-
+  if (!mailResult.ok) return res.status(500).json({ error: "Mail gönderilemedi" });
   return res.json({ ok: true });
 });
 
-// ✅ Secure Note: OTP doğrula (Flutter burada OK bekliyor)
 app.post("/api/secure-note/confirm-reset", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const code = String(req.body?.code || "").trim();
-  const newPin = String(req.body?.newPin || "").trim(); // sadece format kontrolü
+  const newPin = String(req.body?.newPin || "").trim();
 
   console.log(`🟧 [SECURE NOTE CONFIRM] ${nowIso()} email=${maskEmail(email)} code=${code}`);
 
-  if (!email || !code || !newPin) {
-    return res.status(400).json({ error: "email, code, newPin zorunlu" });
-  }
-
-  if (!/^\d{6}$/.test(code)) {
-    return res.status(400).json({ error: "Kod 6 haneli olmalı" });
-  }
-
-  if (!/^\d{4,6}$/.test(newPin)) {
-    return res.status(400).json({ error: "PIN 4-6 haneli olmalı" });
-  }
+  if (!email || !code || !newPin) return res.status(400).json({ error: "email, code, newPin zorunlu" });
+  if (!/^\d{6}$/.test(code)) return res.status(400).json({ error: "Kod 6 haneli olmalı" });
+  if (!/^\d{4,6}$/.test(newPin)) return res.status(400).json({ error: "PIN 4-6 haneli olmalı" });
 
   const entry = secureNoteResetTokens.get(email);
   if (!entry) return res.status(400).json({ error: "Kod bulunamadı" });
@@ -354,9 +379,7 @@ app.post("/api/secure-note/confirm-reset", async (req, res) => {
     return res.status(400).json({ error: "Kod süresi doldu" });
   }
 
-  if (String(entry.code).trim() !== code) {
-    return res.status(400).json({ error: "Kod hatalı" });
-  }
+  if (String(entry.code).trim() !== code) return res.status(400).json({ error: "Kod hatalı" });
 
   secureNoteResetTokens.delete(email);
   return res.json({ ok: true });
@@ -364,41 +387,24 @@ app.post("/api/secure-note/confirm-reset", async (req, res) => {
 
 // ----------------- AUTH ENDPOINTS -----------------
 
-// ✅ Register
 app.post("/api/auth/register", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "").trim();
 
   console.log(`🟦 [REGISTER] ${nowIso()} email=${maskEmail(email)}`);
 
-  if (!email || !password) {
-    return res.status(400).json({ error: "email ve password zorunlu" });
-  }
-  if (users.has(email)) {
-    return res.status(409).json({ error: "Bu e-posta zaten kayıtlı" });
-  }
+  if (!email || !password) return res.status(400).json({ error: "email ve password zorunlu" });
+  if (users.has(email)) return res.status(409).json({ error: "Bu e-posta zaten kayıtlı" });
 
   users.set(email, { email, passwordHash: hashPassword(password) });
-  saveUsersToFile(); // ✅ FIX
+  saveUsersToFile();
 
-  const mailResult = await sendMailSafe({
+  await sendMailSafe({
     to: email,
     subject: "Mani Fal’a Hoş Geldin ✨",
     text: `Merhaba,
 
 Mani Fal’a hoş geldin.
-
-Artık sezgilerine kulak verebileceğin, kendinle baş başa kalabileceğin
-küçük ama anlamlı anlar seni bekliyor.
-
-Her gün:
-• Günlük burç yorumunu okuyabilir
-• Günün tarot kartını keşfedebilir
-• Rüyalarının anlamlarını yorumlayabilir
-• Fal ve ritüellerinle iç dünyana dokunabilirsin
-
-Mani Fal, kesin kehanetler sunmaz;
-sana sadece durup hissetmen için bir alan açar.
 
 Keyifli keşifler dileriz.
 
@@ -406,28 +412,17 @@ Sevgiyle,
 Mani Fal ✨`,
   });
 
-  if (mailResult.ok) {
-    console.log(`✅ [WELCOME MAIL SENT] via=${mailResult.via} to=${maskEmail(email)}`);
-  } else {
-    console.log("📭 [WELCOME MAIL NOT SENT]");
-  }
-
   const token = signToken(email);
-
-  console.log(`✅ [REGISTER OK] users.size=${users.size}`);
   return res.status(201).json({ ok: true, token, email });
 });
 
-// ✅ Login
 app.post("/api/auth/login", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "").trim();
 
   console.log(`🟩 [LOGIN] ${nowIso()} email=${maskEmail(email)}`);
 
-  if (!email || !password) {
-    return res.status(400).json({ error: "email ve password zorunlu" });
-  }
+  if (!email || !password) return res.status(400).json({ error: "email ve password zorunlu" });
 
   const u = users.get(email);
   if (!u) return res.status(401).json({ error: "E-posta veya şifre hatalı" });
@@ -439,23 +434,15 @@ app.post("/api/auth/login", async (req, res) => {
   return res.json({ ok: true, token, email });
 });
 
-// ✅ Forgot Password: OTP üret + mail gönder
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   console.log(`🟨 [FORGOT] ${nowIso()} email=${maskEmail(email)}`);
 
   if (!email) return res.status(400).json({ error: "email zorunlu" });
 
-  const userExists = users.has(email);
-  console.log(`ℹ️ [FORGOT] userExists=${userExists} users.size=${users.size}`);
-
   const code = genOtp();
-  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 dk
+  const expiresAt = Date.now() + 10 * 60 * 1000;
   resetTokens.set(email, { code, expiresAt, createdAt: Date.now() });
-
-  console.log(
-    `✅ [FORGOT OTP SET] email=${maskEmail(email)} code=${code} exp=${new Date(expiresAt).toISOString()}`
-  );
 
   await sendMailSafe({
     to: email,
@@ -463,21 +450,39 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     text: `Şifre sıfırlama kodun: ${code}\nKod 10 dakika geçerlidir.`,
   });
 
-  return res.json({
-    ok: true,
-    message: "Eğer bu e-posta kayıtlıysa doğrulama kodu gönderildi.",
-  });
+  return res.json({ ok: true, message: "Eğer bu e-posta kayıtlıysa doğrulama kodu gönderildi." });
 });
 
-// ✅ Verify Reset Code
 app.post("/api/auth/verify-reset-code", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const code = String(req.body?.code || "").trim();
 
   console.log(`🟧 [VERIFY] ${nowIso()} email=${maskEmail(email)} code=${code}`);
 
-  if (!email || !code) {
-    return res.status(400).json({ error: "email ve code zorunlu" });
+  if (!email || !code) return res.status(400).json({ error: "email ve code zorunlu" });
+
+  const entry = resetTokens.get(email);
+  if (!entry) return res.status(400).json({ error: "Kod bulunamadı" });
+
+  if (Date.now() > entry.expiresAt) {
+    resetTokens.delete(email);
+    return res.status(400).json({ error: "Kod süresi doldu" });
+  }
+
+  if (String(entry.code).trim() !== code) return res.status(400).json({ error: "Kod hatalı" });
+
+  return res.json({ ok: true });
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const code = String(req.body?.code || "").trim();
+  const newPassword = String(req.body?.newPassword || "").trim();
+
+  console.log(`🟥 [RESET] ${nowIso()} email=${maskEmail(email)} code=${code} newPwLen=${newPassword.length}`);
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: "email, code, newPassword zorunlu" });
   }
 
   const entry = resetTokens.get(email);
@@ -488,53 +493,18 @@ app.post("/api/auth/verify-reset-code", async (req, res) => {
     return res.status(400).json({ error: "Kod süresi doldu" });
   }
 
-  if (String(entry.code).trim() !== code) {
-    return res.status(400).json({ error: "Kod hatalı" });
-  }
-
-  return res.json({ ok: true });
-});
-
-// ✅ Reset Password: email + code + newPassword
-app.post("/api/auth/reset-password", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  const code = String(req.body?.code || "").trim();
-  const newPassword = String(req.body?.newPassword || "").trim();
-
-  console.log(
-    `🟥 [RESET] ${nowIso()} email=${maskEmail(email)} code=${code} newPwLen=${newPassword.length}`
-  );
-
-  if (!email || !code || !newPassword) {
-    return res.status(400).json({ error: "email, code, newPassword zorunlu" });
-  }
-
-  const entry = resetTokens.get(email);
-  if (!entry) {
-    console.log("❌ [RESET] entry yok (muhtemelen farklı server/IP veya restart)");
-    return res.status(400).json({ error: "Kod bulunamadı" });
-  }
-
-  if (Date.now() > entry.expiresAt) {
-    resetTokens.delete(email);
-    return res.status(400).json({ error: "Kod süresi doldu" });
-  }
-
-  if (String(entry.code).trim() !== code) {
-    console.log(`❌ [RESET] code mismatch expected=${entry.code} got=${code}`);
-    return res.status(400).json({ error: "Kod hatalı" });
-  }
+  if (String(entry.code).trim() !== code) return res.status(400).json({ error: "Kod hatalı" });
 
   users.set(email, { email, passwordHash: hashPassword(newPassword) });
-  saveUsersToFile(); // ✅ FIX
+  saveUsersToFile();
   resetTokens.delete(email);
 
-  console.log(`✅ [RESET OK] ${maskEmail(email)}`);
   return res.json({ ok: true, message: "Şifre güncellendi" });
 });
 
 // ✅ ADDED: Fortune history (user'a göre)
-app.get("/api/fortune/history", requireAuth, (req, res) => {
+// 🔥 requireAuth yerine requireUserEmail (token varsa token, yoksa email)
+app.get("/api/fortune/history", requireUserEmail, (req, res) => {
   const email = req.user.email;
   const items = listFortunesByEmail(email);
   return res.json({ ok: true, count: items.length, items });
@@ -624,10 +594,8 @@ async function callGeminiVision(parts, { retries = 5 } = {}) {
 }
 
 // ----------------- Upload (multer) -----------------
-// ✅ AYNEN KALDI: kahve falı için memoryStorage
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ✅ ADDED: manifest için disk storage (foto kaydı)
 const manifestUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
@@ -638,7 +606,7 @@ const manifestUpload = multer({
       cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}.${ext || "jpg"}`);
     },
   }),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
 // ----------------- 5dk Job Store -----------------
@@ -649,14 +617,12 @@ function genId() {
   return Date.now().toString() + Math.random().toString(16).slice(2);
 }
 
-// ✅ ADDED (manifest share endpoints)  ✅ UPDATED: photo optional
+// ✅ ADDED (manifest share endpoints)
 app.post("/api/manifest/share", manifestUpload.single("image"), (req, res) => {
   try {
-    // JSON veya multipart ikisi de gelsin:
     const text = String(req.body?.text || req.body?.text === "" ? req.body.text : "").trim();
     let user = req.body?.user ?? null;
 
-    // multipart'ta user JSON string gelebilir
     if (typeof user === "string") {
       try { user = JSON.parse(user); } catch (_) {}
     }
@@ -666,14 +632,13 @@ app.post("/api/manifest/share", manifestUpload.single("image"), (req, res) => {
     }
 
     const shares = readShares();
-
     const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
 
     const item = {
       id: crypto.randomUUID?.() || String(Date.now()),
       text: String(text).trim(),
       user: user || null,
-      imageUrl, // ✅ ADDED
+      imageUrl,
       createdAt: new Date().toISOString(),
       ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || null,
     };
@@ -733,7 +698,6 @@ app.get("/admin/shares", requireAdmin, (req, res) => {
   `);
 });
 
-// ✅ ADDED: detail page (✅ UPDATED: photo show)
 app.get("/admin/shares/:id", requireAdmin, (req, res) => {
   const shares = readShares();
   const item = shares.find((x) => String(x.id) === String(req.params.id));
@@ -876,7 +840,7 @@ Doğum bilgileri:
 // ----------------- Kahve falı endpoints -----------------
 app.post(
   "/api/fortune/coffee",
-  requireAuth,
+  requireUserEmail, // 🔥 FIX: requireAuth yerine
   upload.fields([
     { name: "image_left", maxCount: 1 },
     { name: "image_center", maxCount: 1 },
@@ -899,7 +863,7 @@ app.post(
       }
 
       const name = userProfile?.name || "kullanıcı";
-      const userEmail = req.user?.email;
+      const userEmail = req.user?.email; // ✅ artık her zaman var
 
       const files = req.files || {};
       const left = files["image_left"]?.[0];
@@ -921,7 +885,7 @@ app.post(
         createdAt: new Date().toISOString(),
         resultText: null,
         error: null,
-        userEmail, // ✅ ADDED
+        userEmail,
       });
 
       setTimeout(async () => {
@@ -965,7 +929,6 @@ Görev:
           const trimmed = (resultText || "").trim();
           fortuneJobs.set(id, { ...current, status: "ready", resultText: trimmed, error: null });
 
-          // ✅ ADDED: history save (user'a bağlı)
           if (current.userEmail) {
             addFortune({
               email: current.userEmail,
@@ -987,7 +950,7 @@ Görev:
   }
 );
 
-app.post("/api/fortune/coffee/virtual", requireAuth, async (req, res) => {
+app.post("/api/fortune/coffee/virtual", requireUserEmail, async (req, res) => { // 🔥 FIX
   try {
     const { note, userProfile } = req.body || {};
     const name = userProfile?.name || "kullanıcı";
@@ -1001,7 +964,7 @@ app.post("/api/fortune/coffee/virtual", requireAuth, async (req, res) => {
       createdAt: new Date().toISOString(),
       resultText: null,
       error: null,
-      userEmail, // ✅ ADDED
+      userEmail,
     });
 
     setTimeout(async () => {
@@ -1028,7 +991,6 @@ Görev:
 
         fortuneJobs.set(id, { ...current, status: "ready", resultText: trimmed, error: null });
 
-        // ✅ ADDED: history save (user'a bağlı)
         if (current.userEmail) {
           addFortune({
             email: current.userEmail,
@@ -1049,7 +1011,7 @@ Görev:
   }
 });
 
-app.get("/api/fortune/coffee/:id", requireAuth, (req, res) => {
+app.get("/api/fortune/coffee/:id", requireUserEmail, (req, res) => { // 🔥 FIX
   const id = req.params.id;
   const job = fortuneJobs.get(id);
 
@@ -1058,7 +1020,6 @@ app.get("/api/fortune/coffee/:id", requireAuth, (req, res) => {
   const me = String(req.user?.email || "").toLowerCase().trim();
   const owner = String(job.userEmail || "").toLowerCase().trim();
 
-  // ✅ başka kullanıcı görmesin
   if (!owner || owner !== me) {
     return res.status(404).json({ error: "Fal bulunamadı." });
   }
