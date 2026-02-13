@@ -1038,12 +1038,26 @@ Görev:
   }
 });
 
-app.get("/api/fortune/coffee/:id", (req, res) => {
+app.get("/api/fortune/coffee/:id", requireAuth, (req, res) => {
   const id = req.params.id;
   const job = fortuneJobs.get(id);
+
   if (!job) return res.status(404).json({ error: "Fal bulunamadı." });
+
+  const me = String(req.user?.email || "").toLowerCase().trim();
+  const owner = String(job.userEmail || "").toLowerCase().trim();
+
+  // ✅ başka kullanıcı görmesin
+  if (!owner || owner !== me) {
+    // güvenlik için 404 dönmek daha iyi (id var mı yok mu anlaşılmasın)
+    return res.status(404).json({ error: "Fal bulunamadı." });
+    // istersen 403 de yapabilirsin:
+    // return res.status(403).json({ error: "Forbidden" });
+  }
+
   return res.json(job);
 });
+
 
 // ----------------- Tarot yardımcıları -----------------
 const tarotCardNames = {
