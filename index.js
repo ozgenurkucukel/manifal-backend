@@ -27,11 +27,22 @@ const PORT = process.env.PORT || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-// ✅ ADDED
-const ADMIN_KEY = process.env.ADMIN_KEY || "ozge123!";
-// ✅ CHANGED: Render kalıcı disk (disk mount path /data olmalı)
-const SHARE_FILE = path.join(process.cwd(), "shares.json");
-const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+// ✅ IMPORTANT: Admin key artık ENV zorunlu (hardcode yok)
+const ADMIN_KEY = process.env.ADMIN_KEY;
+
+// ✅ IMPORTANT: Render kalıcı disk yolu /data olmalı
+const DATA_DIR = process.env.DATA_DIR || "/data";
+
+// ✅ NEW: Upload URL’leri full döndürmek için
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
+
+// ✅ CHANGED: kalıcı dosyalar /data altında
+const SHARE_FILE = path.join(DATA_DIR, "shares.json");
+const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
+
+// ✅ FIX: users + fortunes kalıcı dosyalar
+const USERS_FILE = path.join(DATA_DIR, "users.json");
+const FORTUNES_FILE = path.join(DATA_DIR, "fortunes.json");
 
 // ✅ ADDED (JWT)
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
@@ -51,9 +62,13 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
 // ✅ ADDED (JWT helpers)
 function signToken(email) {
-  return jwt.sign({ email: String(email).toLowerCase().trim() }, JWT_SECRET, { expiresIn: "30d" });
+  return jwt.sign({ email: normEmail(email) }, JWT_SECRET, { expiresIn: "30d" });
 }
 
 function requireAuth(req, res, next) {
@@ -63,81 +78,51 @@ function requireAuth(req, res, next) {
 
   try {
     req.user = jwt.verify(token, JWT_SECRET); // {email, iat, exp}
+    req.user.email = normEmail(req.user.email);
+    if (!req.user.email) return res.status(401).json({ error: "Invalid token" });
     return next();
   } catch (e) {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
 
-/* =======================================================================
-   ✅ FIX: Flutter token göndermiyor -> auth opsiyonel + userProfile.email fallback
-   ======================================================================= */
-function tryAuthEmail(req) {
-  const h = req.headers.authorization || "";
-  const token = h.startsWith("Bearer ") ? h.slice(7) : null;
-  if (!token) return null;
-  try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    const email = String(payload?.email || "").toLowerCase().trim();
-    return email || null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function emailFromBody(req) {
-  // JSON veya multipart: userProfile bazen string gelebilir
-  let up = req.body?.userProfile ?? null;
-
-  if (typeof up === "string") {
-    try { up = JSON.parse(up); } catch (_) { up = null; }
-  }
-
-  const email =
-    up?.email ||
-    req.body?.email ||
-    req.body?.userEmail;
-
-  const e = String(email || "").toLowerCase().trim();
-  return e || null;
-}
-
-// token varsa token; yoksa body’den email al
-function resolveUserEmail(req) {
-  return tryAuthEmail(req) || emailFromBody(req);
-}
-
-// requireAuth yerine kullan: token olmasa bile email ile devam edebilir
-function requireUserEmail(req, res, next) {
-  const email = resolveUserEmail(req);
-  if (!email) return res.status(401).json({ error: "Unauthorized (email missing)" });
-  req.user = { email }; // standartlaştır
-  return next();
-}
-/* ======================================================================= */
-
 // ✅ ADDED (manifest share helpers)
-function ensureShareDir() {
+function ensureDir(dirPath) {
   try {
-    const dir = path.dirname(SHARE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
   } catch (e) {
-    console.error("ensureShareDir error", e);
+    console.error("ensureDir error", e);
   }
 }
 
-// ✅ ADDED (upload dir)
-function ensureUploadDir() {
+function ensureFileDir(filePath) {
   try {
-    if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    const dir = path.dirname(filePath);
+    ensureDir(dir);
   } catch (e) {
-    console.error("ensureUploadDir error", e);
+    console.error("ensureFileDir error", e);
   }
 }
-ensureUploadDir();
-ensureShareDir();
 
-// ✅ ADDED (static serve uploads)
+function ensureJsonArrayFile(filePath) {
+  try {
+    ensureFileDir(filePath);
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, JSON.stringify([], null, 2), "utf-8");
+    }
+  } catch (e) {
+    console.error("ensureJsonArrayFile error", filePath, e);
+  }
+}
+
+// ✅ ensure persistent folders/files
+ensureDir(DATA_DIR);
+ensureDir(UPLOAD_DIR);
+ensureJsonArrayFile(SHARE_FILE);
+ensureJsonArrayFile(USERS_FILE);
+ensureJsonArrayFile(FORTUNES_FILE);
+
+// ✅ serve uploads
 app.use("/uploads", express.static(UPLOAD_DIR));
 
 function readShares() {
@@ -154,7 +139,7 @@ function readShares() {
 
 function writeShares(arr) {
   try {
-    ensureShareDir(); // ✅ ADDED
+    ensureJsonArrayFile(SHARE_FILE);
     fs.writeFileSync(SHARE_FILE, JSON.stringify(arr, null, 2), "utf-8");
   } catch (e) {
     console.error("writeShares error", e);
@@ -162,6 +147,8 @@ function writeShares(arr) {
 }
 
 function requireAdmin(req, res, next) {
+  if (!ADMIN_KEY) return res.status(500).send("ADMIN_KEY env missing");
+
   const key = req.headers["x-admin-key"] || req.query.key;
   if (key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
   next();
@@ -183,54 +170,7 @@ const secureNoteResetTokens = new Map(); // email -> { code, expiresAt, createdA
 const users = new Map(); // email -> { email, passwordHash }
 const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 
-// ✅ FIX (FREE): users'ı dosyaya yaz/oku
-const USERS_FILE = path.join(process.cwd(), "users.json");
-
-// ✅ ADDED: fortunes store (user'a göre history)
-const FORTUNES_FILE = path.join(process.cwd(), "fortunes.json");
-
-// ✅ ADDED: fortunes/users dosyaları için klasör garanti
-function ensureFileDir(filePath) {
-  try {
-    const dir = path.dirname(filePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  } catch (e) {
-    console.error("ensureFileDir error", e);
-  }
-}
-
-function loadUsersFromFile() {
-  try {
-    if (!fs.existsSync(USERS_FILE)) return;
-    const raw = fs.readFileSync(USERS_FILE, "utf-8");
-    const arr = JSON.parse(raw || "[]");
-    if (!Array.isArray(arr)) return;
-
-    for (const u of arr) {
-      if (u?.email && u?.passwordHash) {
-        users.set(String(u.email).toLowerCase().trim(), {
-          email: String(u.email).toLowerCase().trim(),
-          passwordHash: String(u.passwordHash),
-        });
-      }
-    }
-    console.log(`🧩 [AUTH BOOT] users loaded = ${users.size}`);
-  } catch (e) {
-    console.error("read users.json error:", e);
-  }
-}
-
-function saveUsersToFile() {
-  try {
-    ensureFileDir(USERS_FILE);
-    const arr = Array.from(users.values());
-    fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
-  } catch (e) {
-    console.error("write users.json error:", e);
-  }
-}
-
-// ✅ ADDED: fortunes io
+// ✅ fortunes store (user'a göre history) - kalıcı
 function readFortunes() {
   try {
     if (!fs.existsSync(FORTUNES_FILE)) return [];
@@ -245,10 +185,10 @@ function readFortunes() {
 
 function writeFortunes(arr) {
   try {
-    ensureFileDir(FORTUNES_FILE);
+    ensureJsonArrayFile(FORTUNES_FILE);
     fs.writeFileSync(FORTUNES_FILE, JSON.stringify(arr, null, 2), "utf-8");
   } catch (e) {
-    console.error("writeFortunes error:", e);
+    console.error("writeFortunes error", e);
   }
 }
 
@@ -256,7 +196,7 @@ function addFortune({ email, type, resultText, meta }) {
   const all = readFortunes();
   all.unshift({
     id: crypto.randomUUID?.() || String(Date.now()),
-    email: String(email).toLowerCase().trim(),
+    email: normEmail(email),
     type: type || "unknown",
     resultText: String(resultText || "").trim(),
     meta: meta || null,
@@ -266,8 +206,38 @@ function addFortune({ email, type, resultText, meta }) {
 }
 
 function listFortunesByEmail(email) {
-  const e = String(email).toLowerCase().trim();
+  const e = normEmail(email);
   return readFortunes().filter((x) => x?.email === e);
+}
+
+function loadUsersFromFile() {
+  try {
+    if (!fs.existsSync(USERS_FILE)) return;
+    const raw = fs.readFileSync(USERS_FILE, "utf-8");
+    const arr = JSON.parse(raw || "[]");
+    if (!Array.isArray(arr)) return;
+
+    for (const u of arr) {
+      const email = normEmail(u?.email);
+      const passwordHash = String(u?.passwordHash || "");
+      if (email && passwordHash) {
+        users.set(email, { email, passwordHash });
+      }
+    }
+    console.log(`🧩 [AUTH BOOT] users loaded = ${users.size}`);
+  } catch (e) {
+    console.error("read users.json error:", e);
+  }
+}
+
+function saveUsersToFile() {
+  try {
+    ensureJsonArrayFile(USERS_FILE);
+    const arr = Array.from(users.values());
+    fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
+  } catch (e) {
+    console.error("write users.json error:", e);
+  }
 }
 
 // ✅ Server açılınca bir kere yükle
@@ -296,6 +266,7 @@ function createMailer() {
 const mailer = createMailer();
 console.log("🧪 RESEND_API_KEY set?", !!process.env.RESEND_API_KEY);
 console.log("🧪 MAIL_FROM =", process.env.MAIL_FROM);
+console.log("🧪 PUBLIC_BASE_URL =", PUBLIC_BASE_URL || "(empty)");
 
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const MAIL_FROM = process.env.MAIL_FROM || "ManiFal <onboarding@resend.dev>";
@@ -324,7 +295,7 @@ async function sendMailSafe({ to, subject, text, html }) {
 
 (async () => {
   if (!mailer) {
-    console.log("📭 SMTP ayarlı değil. OTP maile gitmez, konsola basılır.");
+    console.log("📭 SMTP ayarlı değil. OTP maile gitmez, Resend varsa oradan gider.");
     return;
   }
   try {
@@ -337,7 +308,7 @@ async function sendMailSafe({ to, subject, text, html }) {
 
 // ================== SECURE NOTE RESET (OTP) ==================
 app.post("/api/secure-note/request-reset", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   console.log(`🟨 [SECURE NOTE FORGOT] ${nowIso()} email=${maskEmail(email)}`);
 
   if (!email) return res.status(400).json({ error: "email zorunlu" });
@@ -361,7 +332,7 @@ app.post("/api/secure-note/request-reset", async (req, res) => {
 });
 
 app.post("/api/secure-note/confirm-reset", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   const code = String(req.body?.code || "").trim();
   const newPin = String(req.body?.newPin || "").trim();
 
@@ -386,9 +357,8 @@ app.post("/api/secure-note/confirm-reset", async (req, res) => {
 });
 
 // ----------------- AUTH ENDPOINTS -----------------
-
 app.post("/api/auth/register", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   const password = String(req.body?.password || "").trim();
 
   console.log(`🟦 [REGISTER] ${nowIso()} email=${maskEmail(email)}`);
@@ -417,7 +387,7 @@ Mani Fal ✨`,
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   const password = String(req.body?.password || "").trim();
 
   console.log(`🟩 [LOGIN] ${nowIso()} email=${maskEmail(email)}`);
@@ -435,7 +405,7 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 app.post("/api/auth/forgot-password", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   console.log(`🟨 [FORGOT] ${nowIso()} email=${maskEmail(email)}`);
 
   if (!email) return res.status(400).json({ error: "email zorunlu" });
@@ -454,7 +424,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 });
 
 app.post("/api/auth/verify-reset-code", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   const code = String(req.body?.code || "").trim();
 
   console.log(`🟧 [VERIFY] ${nowIso()} email=${maskEmail(email)} code=${code}`);
@@ -475,7 +445,7 @@ app.post("/api/auth/verify-reset-code", async (req, res) => {
 });
 
 app.post("/api/auth/reset-password", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
+  const email = normEmail(req.body?.email);
   const code = String(req.body?.code || "").trim();
   const newPassword = String(req.body?.newPassword || "").trim();
 
@@ -502,9 +472,8 @@ app.post("/api/auth/reset-password", async (req, res) => {
   return res.json({ ok: true, message: "Şifre güncellendi" });
 });
 
-// ✅ ADDED: Fortune history (user'a göre)
-// 🔥 requireAuth yerine requireUserEmail (token varsa token, yoksa email)
-app.get("/api/fortune/history", requireUserEmail, (req, res) => {
+// ✅ Fortune history artık SADECE token ile
+app.get("/api/fortune/history", requireAuth, (req, res) => {
   const email = req.user.email;
   const items = listFortunesByEmail(email);
   return res.json({ ok: true, count: items.length, items });
@@ -600,9 +569,7 @@ const manifestUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
     filename: (req, file, cb) => {
-      const ext = (file.originalname.split(".").pop() || "jpg")
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, "");
+      const ext = (file.originalname.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "");
       cb(null, `${Date.now()}-${Math.random().toString(16).slice(2)}.${ext || "jpg"}`);
     },
   }),
@@ -617,14 +584,16 @@ function genId() {
   return Date.now().toString() + Math.random().toString(16).slice(2);
 }
 
-// ✅ ADDED (manifest share endpoints)
+// ✅ Manifest share
 app.post("/api/manifest/share", manifestUpload.single("image"), (req, res) => {
   try {
-    const text = String(req.body?.text || req.body?.text === "" ? req.body.text : "").trim();
+    const text = String(req.body?.text || (req.body?.text === "" ? req.body.text : "")).trim();
     let user = req.body?.user ?? null;
 
     if (typeof user === "string") {
-      try { user = JSON.parse(user); } catch (_) {}
+      try {
+        user = JSON.parse(user);
+      } catch (_) {}
     }
 
     if (!text || String(text).trim().length < 3) {
@@ -632,7 +601,11 @@ app.post("/api/manifest/share", manifestUpload.single("image"), (req, res) => {
     }
 
     const shares = readShares();
-    const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+
+    // ✅ FIX: full URL döndür
+    const imageUrl = req.file
+      ? (PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}/uploads/${req.file.filename}` : `/uploads/${req.file.filename}`)
+      : null;
 
     const item = {
       id: crypto.randomUUID?.() || String(Date.now()),
@@ -653,6 +626,7 @@ app.post("/api/manifest/share", manifestUpload.single("image"), (req, res) => {
   }
 });
 
+// ---- admin pages ----
 app.get("/api/admin/manifest/shares", requireAdmin, (req, res) => {
   const shares = readShares();
   res.json({ ok: true, count: shares.length, shares });
@@ -840,7 +814,7 @@ Doğum bilgileri:
 // ----------------- Kahve falı endpoints -----------------
 app.post(
   "/api/fortune/coffee",
-  requireUserEmail, // 🔥 FIX: requireAuth yerine
+  requireAuth,
   upload.fields([
     { name: "image_left", maxCount: 1 },
     { name: "image_center", maxCount: 1 },
@@ -863,7 +837,7 @@ app.post(
       }
 
       const name = userProfile?.name || "kullanıcı";
-      const userEmail = req.user?.email; // ✅ artık her zaman var
+      const userEmail = req.user?.email;
 
       const files = req.files || {};
       const left = files["image_left"]?.[0];
@@ -950,7 +924,7 @@ Görev:
   }
 );
 
-app.post("/api/fortune/coffee/virtual", requireUserEmail, async (req, res) => { // 🔥 FIX
+app.post("/api/fortune/coffee/virtual", requireAuth, async (req, res) => {
   try {
     const { note, userProfile } = req.body || {};
     const name = userProfile?.name || "kullanıcı";
@@ -1011,14 +985,14 @@ Görev:
   }
 });
 
-app.get("/api/fortune/coffee/:id", requireUserEmail, (req, res) => { // 🔥 FIX
+app.get("/api/fortune/coffee/:id", requireAuth, (req, res) => {
   const id = req.params.id;
   const job = fortuneJobs.get(id);
 
   if (!job) return res.status(404).json({ error: "Fal bulunamadı." });
 
-  const me = String(req.user?.email || "").toLowerCase().trim();
-  const owner = String(job.userEmail || "").toLowerCase().trim();
+  const me = normEmail(req.user?.email);
+  const owner = normEmail(job.userEmail);
 
   if (!owner || owner !== me) {
     return res.status(404).json({ error: "Fal bulunamadı." });
@@ -1046,11 +1020,7 @@ function buildPrompt(body) {
   const age = userProfile?.age;
   const gender = userProfile?.gender;
 
-  const profileText = whereNotNull([
-    `İsim: ${name}`,
-    age ? `Yaş: ${age}` : null,
-    gender ? `Cinsiyet: ${gender}` : null,
-  ]).join(", ");
+  const profileText = whereNotNull([`İsim: ${name}`, age ? `Yaş: ${age}` : null, gender ? `Cinsiyet: ${gender}` : null]).join(", ");
 
   if (type === "tarot_spread") {
     const tarot = fortuneContext?.tarot || {};
