@@ -650,6 +650,137 @@ async function callGeminiVision(parts, { retries = 5 } = {}) {
 // ----------------- Upload (multer) -----------------
 const upload = multer({ storage: multer.memoryStorage() });
 
+/* ✅✅✅ ADDED: EL FALI (PALM) PHOTO ENDPOINT — sadece eklendi, başka yere dokunulmadı */
+app.post(
+  "/api/fortune/photo",
+  upload.fields([
+    { name: "leftHand", maxCount: 1 },
+    { name: "rightHand", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      const type = String(req.body?.type || "").trim();
+      if (type !== "palm") {
+        return res.status(400).json({ error: "Geçersiz type. Beklenen: palm" });
+      }
+
+      // userProfile parse
+      let userProfile = null;
+      try {
+        userProfile = req.body?.userProfile ? JSON.parse(req.body.userProfile) : null;
+      } catch (_) {
+        userProfile = null;
+      }
+
+      // fortuneContext parse
+      let fortuneContext = null;
+      try {
+        fortuneContext = req.body?.fortuneContext ? JSON.parse(req.body.fortuneContext) : null;
+      } catch (_) {
+        fortuneContext = null;
+      }
+
+      const name = userProfile?.name || "kullanıcı";
+
+      const files = req.files || {};
+      const left = files["leftHand"]?.[0];
+      const right = files["rightHand"]?.[0];
+
+      if (!left && !right) {
+        return res.status(400).json({ error: "En az 1 avuç içi fotoğrafı gerekli (leftHand/rightHand)" });
+      }
+
+      const palm = fortuneContext?.palm || {};
+      const handedness = palm?.handedness || "right";
+      const ageRange = palm?.ageRange || "26-35";
+      const focus = palm?.focus || "general";
+      const note = (palm?.note || "").toString().trim();
+
+      const focusLabel =
+        focus === "love" ? "Aşk" : focus === "career" ? "Kariyer" : focus === "money" ? "Para" : "Genel";
+
+      // token varsa email al (zorunlu değil)
+      let userEmail = null;
+      try {
+        const h = req.headers.authorization || "";
+        const token = h.startsWith("Bearer ") ? h.slice(7) : null;
+        if (token) {
+          const payload = jwt.verify(token, JWT_SECRET);
+          const em = normEmail(payload?.email);
+          if (em) userEmail = em;
+        }
+      } catch (_) {}
+
+      // token yoksa profile email
+      if (!userEmail && userProfile?.email) userEmail = normEmail(userProfile.email);
+
+      const prompt = `
+Sen deneyimli bir el falı (palmistry) yorumcususun ve Türkçe konuşuyorsun.
+
+Kullanıcı: ${name}
+Sağlak/Solak: ${handedness === "left" ? "Solak" : "Sağlak"}
+Yaş aralığı: ${ageRange}
+Odak: ${focusLabel}
+Kullanıcı notu: "${note || "Yok"}"
+
+Görev:
+- Gönderilen avuç içi fotoğraf(lar)ındaki temel çizgileri (kalp çizgisi, akıl çizgisi, hayat çizgisi, kader çizgisi) ve genel el formunu yorumla.
+- Kesin hüküm verme, korkutucu/tehditkâr dil kullanma.
+- 4 başlık kullan: Genel Enerji, Aşk, Kariyer/Para, Yakın Dönem Tavsiye.
+- 3–6 paragraf arası, akıcı ve empatik yaz.
+- En sonda kısa bir kapanış cümlesi ekle.
+`.trim();
+
+      const parts = [{ text: prompt }];
+
+      if (left) {
+        parts.push({ text: "\n[Sol El]" });
+        parts.push({
+          inlineData: {
+            mimeType: left.mimetype || "image/jpeg",
+            data: left.buffer.toString("base64"),
+          },
+        });
+      }
+
+      if (right) {
+        parts.push({ text: "\n[Sağ El]" });
+        parts.push({
+          inlineData: {
+            mimeType: right.mimetype || "image/jpeg",
+            data: right.buffer.toString("base64"),
+          },
+        });
+      }
+
+      const resultText = await callGeminiVision(parts);
+      const trimmed = (resultText || "").trim();
+
+      if (userEmail) {
+        addFortune({
+          email: userEmail,
+          type: "palm",
+          resultText: trimmed,
+          meta: {
+            focus: focus || null,
+            handedness: handedness || null,
+            ageRange: ageRange || null,
+            note: note || null,
+            hasLeftHandPhoto: !!left,
+            hasRightHandPhoto: !!right,
+          },
+        });
+      }
+
+      return res.json({ resultText: trimmed });
+    } catch (e) {
+      console.error("❌ /api/fortune/photo (palm) hata:", e);
+      return res.status(500).json({ error: "El falı üretilemedi." });
+    }
+  }
+);
+/* ✅✅✅ END ADDED */
+
 const manifestUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
