@@ -369,6 +369,23 @@ async function sendMailSafe({ to, subject, text, html }) {
   }
 })();
 
+/* ✅✅✅ ADDED: MIME FIX helper (sadece eklendi, başka yere dokunulmadı) */
+function guessImageMime(file) {
+  const name = String(file?.originalname || "").toLowerCase();
+  const mt = String(file?.mimetype || "").toLowerCase();
+
+  if (mt === "image/jpeg" || mt === "image/jpg") return "image/jpeg";
+  if (mt === "image/png") return "image/png";
+  if (mt === "image/webp") return "image/webp";
+
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+
+  return "image/jpeg";
+}
+/* ✅✅✅ END ADDED */
+
 // ================== SECURE NOTE RESET (OTP) ==================
 app.post("/api/secure-note/request-reset", async (req, res) => {
   const email = normEmail(req.body?.email);
@@ -737,7 +754,7 @@ Görev:
         parts.push({ text: "\n[Sol El]" });
         parts.push({
           inlineData: {
-            mimeType: left.mimetype || "image/jpeg",
+            mimeType: guessImageMime(left),
             data: left.buffer.toString("base64"),
           },
         });
@@ -747,7 +764,7 @@ Görev:
         parts.push({ text: "\n[Sağ El]" });
         parts.push({
           inlineData: {
-            mimeType: right.mimetype || "image/jpeg",
+            mimeType: guessImageMime(right),
             data: right.buffer.toString("base64"),
           },
         });
