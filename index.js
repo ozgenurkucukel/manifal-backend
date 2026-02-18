@@ -1091,20 +1091,95 @@ ${note ? `- Kullanıcı notu: "${note}"` : ""}
 }
 
 function buildPrompt(body) {
-  // ✅ CHANGED: sadece destructure'a yildiznameInput eklendi
-  const { type, userProfile, note, fortuneContext, yildiznameInput } = body || {};
-
-  // ✅✅✅ ADDED: Yıldızname özel prompt (başka hiçbir yere dokunmadı)
-  if (type === "yildizname") {
-    return buildYildiznamePrompt({ userProfile, yildiznameInput });
-  }
+  const { type, userProfile, note, fortuneContext } = body || {};
 
   const name = userProfile?.name || "kullanıcı";
   const age = userProfile?.age;
   const gender = userProfile?.gender;
 
-  const profileText = whereNotNull([`İsim: ${name}`, age ? `Yaş: ${age}` : null, gender ? `Cinsiyet: ${gender}` : null]).join(", ");
+  const profileText = whereNotNull([
+    `İsim: ${name}`,
+    age ? `Yaş: ${age}` : null,
+    gender ? `Cinsiyet: ${gender}` : null,
+  ]).join(", ");
 
+  // ✅ ✅ ✅ YILDIZNAME ÖZEL (KATI FORMAT)
+  if (type === "yildizname") {
+    const yi = body?.yildiznameInput || {};
+    const birthDate = yi?.birthDate || body?.birthDate || "-";
+    const birthTime = yi?.birthTime || body?.birthTime || null;
+    const timeUnknown = !!yi?.timeUnknown;
+    const timeAccuracy = yi?.timeAccuracy || (timeUnknown ? "Bilmiyorum" : "Kesin");
+    const birthPlace = yi?.birthPlace || body?.birthPlace || "-";
+    const focusArea = yi?.focusArea || "general";
+    const userNote = yi?.note || note || "";
+
+    // Saat yoksa model bazen “evleri atlıyor” → bunu formatla kilitliyoruz
+    return `
+Sen deneyimli bir astrologsun ve Türkçe konuşuyorsun.
+
+Görev:
+Aşağıdaki doğum bilgilerine göre "Yıldızname" yorumu üret.
+
+⚠️ EN ÖNEMLİ KURAL:
+Cevap MUTLAKA aşağıdaki BAŞLIKLARLA ve aynı sırayla yazılacak.
+Hiçbir başlık atlanmayacak.
+"12 EV" bölümü her zaman 12 madde içerecek (1’den 12’ye).
+Saat bilinmiyorsa bile her ev için "yaklaşık / saat gerekir" notu düşerek yine 12 madde yaz.
+
+Biçim:
+- Sadece DÜZ METİN / MARKDOWN yaz.
+- Başlıkları aynen kullan (## ile).
+- Abartılı/uydurma kesinlik verme.
+- Korkutucu/tehditkâr dil yok.
+- 600–900 kelime arası, akıcı ve empatik.
+
+Kullanıcı Profili:
+${profileText || "Profil bilgisi sınırlı."}
+
+Doğum Bilgileri:
+- Doğum tarihi: ${birthDate}
+- Doğum saati: ${birthTime ? birthTime : "(Bilinmiyor)"}
+- Saat durumu: ${timeUnknown ? "Bilinmiyor" : "Biliniyor"} | Doğruluk: ${timeAccuracy}
+- Doğum yeri: ${birthPlace}
+- Odak alanı: ${focusArea}
+- Kullanıcı notu: ${userNote ? `"${String(userNote).trim()}"` : "(Yok)"}
+
+ZORUNLU ÇIKTI ŞABLONU:
+
+## Kısa Özet (3–5 madde)
+- ...
+- ...
+
+## Yükselen & Genel Harita Enerjisi
+(2–3 paragraf. Saat bilinmiyorsa yükselen/evlerin değişebileceğini açıkça söyle.)
+
+## 12 Ev Yorumu
+1) 1. Ev: (ev teması + burç/enerji veya "yaklaşık" notu)
+2) 2. Ev:
+3) 3. Ev:
+4) 4. Ev:
+5) 5. Ev:
+6) 6. Ev:
+7) 7. Ev:
+8) 8. Ev:
+9) 9. Ev:
+10) 10. Ev:
+11) 11. Ev:
+12) 12. Ev:
+
+## Odak Alanı: ${focusArea}
+(Seçilen odağa göre 2–3 paragraf somut ama “kesin kehanet”siz yorum.)
+
+## Yakın Dönem Tavsiye & Kapanış
+(3 kısa öneri + 1 kapanış cümlesi. En fazla 2 emoji.)
+
+Not:
+Evlerde burç isimleri/yerleşimler kesin bilinmiyorsa "yaklaşık" de, ama yine de her ev için yorum yaz.
+`.trim();
+  }
+
+  // ----------------- Tarot özel -----------------
   if (type === "tarot_spread") {
     const tarot = fortuneContext?.tarot || {};
     const selectedIds = tarot.selectedCards || [];
@@ -1141,6 +1216,7 @@ Yönergeler:
 `.trim();
   }
 
+  // ----------------- Default -----------------
   return `
 Sen empatik bir spiritüel rehbersin.
 Aşağıdaki bağlama göre kullanıcıya sıcak, anlaşılır ve pozitif bir yorum yap.
@@ -1155,6 +1231,7 @@ Fortune context JSON:
 ${JSON.stringify(fortuneContext, null, 2)}
 `.trim();
 }
+
 
 // ----------------- Günlük burç endpoint’i -----------------
 app.post("/api/fortune/horoscope", async (req, res) => {
