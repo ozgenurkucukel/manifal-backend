@@ -1013,8 +1013,91 @@ const tarotCardNames = {
   death: "Ölüm (Death)",
 };
 
+// ✅✅✅ ADDED: Yıldızname yardımcıları (sadece eklendi, başka yere dokunulmadı)
+function normalizeFocusLabel(id) {
+  const map = {
+    general: "Genel",
+    love: "Aşk",
+    career: "Kariyer",
+    money: "Para",
+    family: "Aile",
+    spiritual: "Ruhsallık",
+    health: "Sağlık",
+    education: "Eğitim",
+  };
+  return map[id] || "Genel";
+}
+
+function buildYildiznamePrompt({ userProfile, yildiznameInput }) {
+  const name = userProfile?.name || "kullanıcı";
+  const age = userProfile?.age;
+  const gender = userProfile?.gender;
+
+  const bd = yildiznameInput?.birthDate || "Bilinmiyor";
+  const bt = yildiznameInput?.birthTime || null;
+  const place = yildiznameInput?.birthPlace || "Bilinmiyor";
+  const timeUnknown = !!yildiznameInput?.timeUnknown;
+  const acc = yildiznameInput?.timeAccuracy || (timeUnknown ? "Bilmiyorum" : "Kesin");
+  const focusId = yildiznameInput?.focusArea || "general";
+  const focus = normalizeFocusLabel(focusId);
+  const note = (yildiznameInput?.note || "").trim();
+
+  const timeLine = timeUnknown ? "Bilinmiyor" : (bt || "Bilinmiyor");
+
+  return `
+Sen deneyimli bir Yıldızname yorumcususun. Türkçe yaz.
+Uydurma / absürt / alakasız kehanet yazma. Net, sıcak ama gerçekçi bir dil kullan.
+
+ÖNEMLİ:
+- Bu bir “Yıldızname tarzı yorum”dur. Gerçek astronomik hesap (ephemeris) yapmıyorsun.
+- Doğum saati bilinmiyorsa Yükselen ve evler değişebilir. Bunu açıkça belirt.
+- Kesin hüküm verme; “enerji, eğilim, olasılık” dili kullan.
+- Korkutma, tehdit etme.
+
+KULLANICI:
+- İsim: ${name}${age ? `, Yaş: ${age}` : ""}${gender ? `, Cinsiyet: ${gender}` : ""}
+
+DOĞUM BİLGİLERİ:
+- Doğum tarihi: ${bd}
+- Doğum saati: ${timeLine}
+- Saat doğruluğu: ${acc}
+- Doğum yeri: ${place}
+
+ODAK:
+- Odak alanı: ${focus}
+${note ? `- Kullanıcı notu: "${note}"` : ""}
+
+ÇIKTI FORMAT:
+1) “Genel Özet” (3-5 cümle). Saat bilinmiyorsa “yaklaşık yorum” uyarısını burada yaz.
+2) Sonra 12 ev başlık başlık:
+   - Yükselen & 1. Ev (Benlik)
+   - 2. Ev (Para & Özdeğer)
+   - 3. Ev (İletişim & Öğrenme)
+   - 4. Ev (Aile & Kökler)
+   - 5. Ev (Aşk & Yaratıcılık)
+   - 6. Ev (Düzen & Sağlık)
+   - 7. Ev (İlişkiler & Ortaklık)
+   - 8. Ev (Dönüşüm & Paylaşımlar)
+   - 9. Ev (Uzaklar & İnançlar)
+   - 10. Ev (Kariyer & İtibar)
+   - 11. Ev (Sosyal çevre & Hedefler)
+   - 12. Ev (Bilinçaltı & Ruh)
+   Her başlık 2-4 cümle olsun.
+3) En sonda: “${focus} için Öneri & Dikkat” başlığı altında 5 madde yaz.
+4) Emoji en fazla 3-4 tane kullan.
+
+Şimdi bu formatta yıldızname yorumunu üret.
+`.trim();
+}
+
 function buildPrompt(body) {
-  const { type, userProfile, note, fortuneContext } = body || {};
+  // ✅ CHANGED: sadece destructure'a yildiznameInput eklendi
+  const { type, userProfile, note, fortuneContext, yildiznameInput } = body || {};
+
+  // ✅✅✅ ADDED: Yıldızname özel prompt (başka hiçbir yere dokunmadı)
+  if (type === "yildizname") {
+    return buildYildiznamePrompt({ userProfile, yildiznameInput });
+  }
 
   const name = userProfile?.name || "kullanıcı";
   const age = userProfile?.age;
