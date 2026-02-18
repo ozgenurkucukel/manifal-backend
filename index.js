@@ -44,6 +44,9 @@ const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const FORTUNES_FILE = path.join(DATA_DIR, "fortunes.json");
 
+// ✅ NEW: todos kalıcı dosya (Render disk)
+const TODOS_FILE = path.join(DATA_DIR, "todos.json");
+
 // ✅ ADDED (JWT)
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret";
 
@@ -121,6 +124,7 @@ ensureDir(UPLOAD_DIR);
 ensureJsonArrayFile(SHARE_FILE);
 ensureJsonArrayFile(USERS_FILE);
 ensureJsonArrayFile(FORTUNES_FILE);
+ensureJsonArrayFile(TODOS_FILE);
 
 // ✅ serve uploads
 app.use("/uploads", express.static(UPLOAD_DIR));
@@ -208,6 +212,65 @@ function addFortune({ email, type, resultText, meta }) {
 function listFortunesByEmail(email) {
   const e = normEmail(email);
   return readFortunes().filter((x) => x?.email === e);
+}
+
+// ================== TODO STORE (PERSISTENT) ==================
+function readTodos() {
+  try {
+    if (!fs.existsSync(TODOS_FILE)) return [];
+    const raw = fs.readFileSync(TODOS_FILE, "utf-8");
+    const data = JSON.parse(raw || "[]");
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("readTodos error:", e);
+    return [];
+  }
+}
+
+function writeTodos(arr) {
+  try {
+    ensureJsonArrayFile(TODOS_FILE);
+    fs.writeFileSync(TODOS_FILE, JSON.stringify(arr, null, 2), "utf-8");
+  } catch (e) {
+    console.error("writeTodos error", e);
+  }
+}
+
+function getTodosByEmail(email) {
+  const e = normEmail(email);
+  const all = readTodos();
+  const doc = all.find((x) => x?.email === e);
+  return Array.isArray(doc?.items) ? doc.items : [];
+}
+
+function setTodosByEmail(email, items) {
+  const e = normEmail(email);
+  const all = readTodos();
+
+  const cleaned = Array.isArray(items) ? items : [];
+  const safeItems = cleaned
+    .filter((it) => it && typeof it === "object")
+    .slice(0, 300)
+    .map((it) => ({
+      id: String(it.id || "").trim() || (crypto.randomUUID?.() || String(Date.now())),
+      text: String(it.text || "").trim().slice(0, 240),
+      done: !!it.done,
+      updatedAt: it.updatedAt ? String(it.updatedAt) : new Date().toISOString(),
+    }))
+    .filter((it) => it.text.length > 0);
+
+  const idx = all.findIndex((x) => x?.email === e);
+  const doc = {
+    email: e,
+    items: safeItems,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (idx >= 0) all[idx] = doc;
+  else all.unshift(doc);
+
+  writeTodos(all);
+  return safeItems;
 }
 
 function loadUsersFromFile() {
@@ -477,6 +540,28 @@ app.get("/api/fortune/history", requireAuth, (req, res) => {
   const email = req.user.email;
   const items = listFortunesByEmail(email);
   return res.json({ ok: true, count: items.length, items });
+});
+
+// ================== TODO ENDPOINTS (JWT) ==================
+
+// Listeyi getir
+app.get("/api/todo", requireAuth, (req, res) => {
+  const email = req.user.email;
+  const items = getTodosByEmail(email);
+  return res.json({ ok: true, items });
+});
+
+// Listeyi komple kaydet (overwrite)
+app.put("/api/todo", requireAuth, (req, res) => {
+  const email = req.user.email;
+  const items = req.body?.items;
+
+  if (!Array.isArray(items)) {
+    return res.status(400).json({ error: "items array olmalı" });
+  }
+
+  const saved = setTodosByEmail(email, items);
+  return res.json({ ok: true, items: saved });
 });
 
 // ----------------- Gemini helpers (RETRY + BACKOFF) -----------------
@@ -1114,7 +1199,6 @@ function buildPrompt(body) {
     const focusArea = yi?.focusArea || "general";
     const userNote = yi?.note || note || "";
 
-    // Saat yoksa model bazen “evleri atlıyor” → bunu formatla kilitliyoruz
     return `
 Sen deneyimli bir astrologsun ve Türkçe konuşuyorsun.
 
@@ -1179,7 +1263,6 @@ Evlerde burç isimleri/yerleşimler kesin bilinmiyorsa "yaklaşık" de, ama yine
 `.trim();
   }
 
-  // ----------------- Tarot özel -----------------
   if (type === "tarot_spread") {
     const tarot = fortuneContext?.tarot || {};
     const selectedIds = tarot.selectedCards || [];
@@ -1216,7 +1299,6 @@ Yönergeler:
 `.trim();
   }
 
-  // ----------------- Default -----------------
   return `
 Sen empatik bir spiritüel rehbersin.
 Aşağıdaki bağlama göre kullanıcıya sıcak, anlaşılır ve pozitif bir yorum yap.
@@ -1231,7 +1313,6 @@ Fortune context JSON:
 ${JSON.stringify(fortuneContext, null, 2)}
 `.trim();
 }
-
 
 // ----------------- Günlük burç endpoint’i -----------------
 app.post("/api/fortune/horoscope", async (req, res) => {
