@@ -552,6 +552,64 @@ app.post("/api/auth/reset-password", async (req, res) => {
   return res.json({ ok: true, message: "Şifre güncellendi" });
 });
 
+// ✅✅✅ ✅✅✅ ✅✅✅
+// ✅ NEW: DELETE ACCOUNT ENDPOINT (SADECE EKLENDİ)
+app.post("/api/auth/delete-account", async (req, res) => {
+  try {
+    const email = normEmail(req.body?.email);
+    const password = String(req.body?.password || "").trim();
+
+    console.log(`🗑️ [DELETE ACCOUNT] ${nowIso()} email=${maskEmail(email)}`);
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "email ve password zorunlu" });
+    }
+
+    const u = users.get(email);
+    if (!u) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+
+    const ok = u.passwordHash === hashPassword(password);
+    if (!ok) return res.status(401).json({ error: "Şifre hatalı" });
+
+    // 1) user sil
+    users.delete(email);
+    saveUsersToFile();
+
+    // 2) fortunes sil
+    try {
+      const all = readFortunes();
+      const filtered = all.filter((x) => normEmail(x?.email) !== email);
+      writeFortunes(filtered);
+    } catch (e) {
+      console.error("delete fortunes error", e);
+    }
+
+    // 3) todos sil
+    try {
+      const allTodos = readTodos();
+      const filteredTodos = allTodos.filter((x) => normEmail(x?.email) !== email);
+      writeTodos(filteredTodos);
+    } catch (e) {
+      console.error("delete todos error", e);
+    }
+
+    // 4) token map temizliği (opsiyonel)
+    try {
+      resetTokens.delete(email);
+    } catch (_) {}
+    try {
+      secureNoteResetTokens.delete(email);
+    } catch (_) {}
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("❌ delete-account error:", e);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+// ✅ END NEW
+// ✅✅✅ ✅✅✅ ✅✅✅
+
 // ✅ Fortune history artık SADECE token ile
 app.get("/api/fortune/history", requireAuth, (req, res) => {
   const email = req.user.email;
