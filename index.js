@@ -171,8 +171,33 @@ function escapeHtml(str) {
 const secureNoteResetTokens = new Map(); // email -> { code, expiresAt, createdAt }
 
 // ----------------- AUTH (DEMO STORE) -----------------
-const users = new Map(); // email -> { email, passwordHash }
+// ✅✅✅ CHANGED: artık profile da saklanıyor
+// email -> { email, passwordHash, profile }
+const users = new Map();
 const resetTokens = new Map(); // email -> { code, expiresAt, createdAt }
+
+// ✅✅✅ ADDED: profile helper (sadece auth kısmı için)
+function buildProfileFromBody(body = {}) {
+  return {
+    name: body?.name != null ? String(body.name).trim() : null,
+    birthDate: body?.birthDate != null ? String(body.birthDate).trim() : null,
+    job: body?.job != null ? String(body.job).trim() : null,
+    gender: body?.gender != null ? String(body.gender).trim() : null,
+    relationshipStatus: body?.relationshipStatus != null ? String(body.relationshipStatus).trim() : null,
+    focusArea: body?.focusArea != null ? String(body.focusArea).trim() : null,
+    city: body?.city != null ? String(body.city).trim() : null,
+    country: body?.country != null ? String(body.country).trim() : null,
+  };
+}
+
+function cleanProfile(p) {
+  const prof = p && typeof p === "object" ? { ...p } : {};
+  Object.keys(prof).forEach((k) => {
+    if (prof[k] == null) delete prof[k];
+    if (typeof prof[k] === "string" && prof[k].trim() === "") delete prof[k];
+  });
+  return prof;
+}
 
 // ✅ fortunes store (user'a göre history) - kalıcı
 function readFortunes() {
@@ -283,8 +308,9 @@ function loadUsersFromFile() {
     for (const u of arr) {
       const email = normEmail(u?.email);
       const passwordHash = String(u?.passwordHash || "");
+      const profile = cleanProfile(u?.profile || {});
       if (email && passwordHash) {
-        users.set(email, { email, passwordHash });
+        users.set(email, { email, passwordHash, profile });
       }
     }
     console.log(`🧩 [AUTH BOOT] users loaded = ${users.size}`);
@@ -296,10 +322,14 @@ function loadUsersFromFile() {
 function saveUsersToFile() {
   try {
     ensureJsonArrayFile(USERS_FILE);
-    const arr = Array.from(users.values());
+    const arr = Array.from(users.values()).map((u) => ({
+      email: u.email,
+      passwordHash: u.passwordHash,
+      profile: cleanProfile(u.profile || {}),
+    }));
     fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2), "utf-8");
   } catch (e) {
-    console.error("write users.json error:", e);
+    console.error("write users.json error", e);
   }
 }
 
@@ -446,7 +476,15 @@ app.post("/api/auth/register", async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: "email ve password zorunlu" });
   if (users.has(email)) return res.status(409).json({ error: "Bu e-posta zaten kayıtlı" });
 
-  users.set(email, { email, passwordHash: hashPassword(password) });
+  // ✅✅✅ CHANGED: profile kaydet
+  const incomingProfile = cleanProfile(buildProfileFromBody(req.body));
+  const profile = {
+    ...incomingProfile,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+
+  users.set(email, { email, passwordHash: hashPassword(password), profile });
   saveUsersToFile();
 
   await sendMailSafe({
@@ -463,7 +501,9 @@ Mani Fal ✨`,
   });
 
   const token = signToken(email);
-  return res.status(201).json({ ok: true, token, email });
+
+  // ✅✅✅ CHANGED: user profile dön
+  return res.status(201).json({ ok: true, token, email, user: profile });
 });
 
 app.post("/api/auth/login", async (req, res) => {
@@ -481,7 +521,10 @@ app.post("/api/auth/login", async (req, res) => {
   if (!ok) return res.status(401).json({ error: "E-posta veya şifre hatalı" });
 
   const token = signToken(email);
-  return res.json({ ok: true, token, email });
+
+  // ✅✅✅ CHANGED: user profile dön
+  const profile = cleanProfile(u.profile || {});
+  return res.json({ ok: true, token, email, user: profile });
 });
 
 app.post("/api/auth/forgot-password", async (req, res) => {
@@ -545,7 +588,12 @@ app.post("/api/auth/reset-password", async (req, res) => {
 
   if (String(entry.code).trim() !== code) return res.status(400).json({ error: "Kod hatalı" });
 
-  users.set(email, { email, passwordHash: hashPassword(newPassword) });
+  // ✅✅✅ CHANGED: mevcut profili koru
+  const existing = users.get(email);
+  const existingProfile = cleanProfile(existing?.profile || {});
+  const nextProfile = { ...existingProfile, updatedAt: nowIso() };
+
+  users.set(email, { email, passwordHash: hashPassword(newPassword), profile: nextProfile });
   saveUsersToFile();
   resetTokens.delete(email);
 
